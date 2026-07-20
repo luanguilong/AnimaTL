@@ -1,0 +1,33 @@
+{
+  "name": "anima",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "Anima": {
+        "$className": "Folder",
+        "Shared": {
+          "$path": "src/shared"
+        },
+        "Runtime": {
+          "$path": "src/runtime"
+        },
+        "Cutscenes": {
+          "$path": "cutscenes"
+        }
+      }
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService"
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "AnimaClient": {
+          "$path": "src/client"
+        }
+      }
+    }
+  }
+}

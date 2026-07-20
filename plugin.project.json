@@ -1,0 +1,15 @@
+{
+  "name": "AnimaPlugin",
+  "tree": {
+    "$path": "src/plugin",
+    "Shared": {
+      "$path": "src/shared"
+    },
+    "Runtime": {
+      "$path": "src/runtime"
+    },
+    "Packages": {
+      "$path": "Packages"
+    }
+  }
+}

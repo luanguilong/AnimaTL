@@ -1,0 +1,21 @@
+# rokit 安装的二进制不入库(靠 rokit.toml 复现)
+# 构建产物
+*.rbxm
+*.rbxmx
+*.rbxl
+*.rbxlx
+!test-place.rbxlx
+
+# wally 依赖(靠 wally.toml + wally.lock 复现)
+/Packages/
+/ServerPackages/
+/DevPackages/
+
+# 编辑器 / 系统
+.DS_Store
+*.log
+
+# 注意:.ssh/ .claude/ 等敏感目录在 workspace 根,本仓库在子目录内,不受影响
+
+# 构建产物目录
+/build/

@@ -1,0 +1,7 @@
+# anima 工具链 — 由 rokit 管理(https://github.com/rojo-rbx/rokit)
+# 装齐:在项目目录运行 `rokit install`
+[tools]
+rojo = "rojo-rbx/rojo@7.5.1"
+stylua = "JohnnyMorganz/StyLua@2.1.0"
+selene = "Kampfkarren/selene@0.29.0"
+wally = "UpliftGames/wally@0.3.2"

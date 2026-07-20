@@ -1,0 +1,28 @@
+{
+  "name": "anima-dev",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "Anima": {
+        "$className": "Folder",
+        "Shared": { "$path": "src/shared" },
+        "Runtime": { "$path": "src/runtime" },
+        "Cutscenes": { "$path": "cutscenes" }
+      },
+      "AnimaPluginSrc": {
+        "$path": "src/plugin",
+        "Shared": { "$path": "src/shared" },
+        "Runtime": { "$path": "src/runtime" },
+        "Packages": { "$path": "Packages" }
+      }
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "AnimaClient": { "$path": "src/client" }
+      }
+    }
+  }
+}
