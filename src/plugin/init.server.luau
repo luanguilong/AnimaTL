@@ -29,6 +29,10 @@ local EditorPersistence = require(script.EditorPersistence)
 local InputPrompt = require(script.InputPrompt)
 local ContextMenu = require(script.ContextMenu)
 local CutsceneExport = require(script.CutsceneExport)
+local CutsceneBrowser = require(script.CutsceneBrowser)
+local MoonImport = require(script.MoonImport)
+local AnimationAsset = require(script.AnimationAsset)
+local Theme = require(script.Theme)
 local PathPreviewPrefs = require(script.PathPreviewPrefs)
 
 local ChangeHistoryService = game:GetService("ChangeHistoryService")
@@ -59,6 +63,7 @@ local plugin = plugin :: Plugin
 local DRAFT_DEBOUNCE_SEC = 2
 local EXPORT_TIME_EPS = 1e-4
 local draftSaveScheduled = false
+local lastSubPath = "" -- 最近一次打开/导出的 Cutscenes 子路径,供另存/导出预填
 
 local function resolveInitialCutscene(): CutsceneFormat.Cutscene
 	local draft = EditorPersistence.readDraft(plugin)
@@ -116,6 +121,9 @@ local widget = plugin:CreateDockWidgetPluginGui(
 )
 widget.Title = "Anima Timeline"
 widget.Name = "AnimaTimeline"
+-- DockWidget 默认 ZIndexBehavior=Global,会让浮层(菜单/弹窗,内部小 ZIndex)被面板高 ZIndex
+-- 元素(播放头 50 等)全局压住;OverlayHost 的"最后子级+ZIndex 100 恒在最上"依赖 Sibling。
+widget.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
 local previewWidget = plugin:CreateDockWidgetPluginGui(
 	"AnimaCameraPreview",
@@ -123,6 +131,7 @@ local previewWidget = plugin:CreateDockWidgetPluginGui(
 )
 previewWidget.Title = "Anima 相机预览"
 previewWidget.Name = "AnimaCameraPreview"
+previewWidget.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 
 local playback = Playback.new(state)
 local recorder = Recorder.new(state)
@@ -298,7 +307,7 @@ local function promptExportToPlace(gui: PluginGui)
 			end
 			InputPrompt.show(gui, {
 				title = "导出 · 子路径(可选)",
-				default = "",
+				default = lastSubPath,
 				placeholder = "留空=Cutscenes 根; 例 Skills/Ult",
 				onSubmit = function(subPath)
 					local cs = getCutscene()
@@ -315,13 +324,21 @@ local function promptExportToPlace(gui: PluginGui)
 								default = tostring(totalFrames),
 								placeholder = `留空=总帧 {totalFrames}`,
 								onSubmit = function(endTxt)
-									local fromSec = CutsceneExport.parseExportTimeInput(startTxt, fps, 0)
-									local toSec = CutsceneExport.parseExportTimeInput(endTxt, fps, fullDur)
+									local fromSec =
+										CutsceneExport.parseExportTimeInput(startTxt, fps, 0)
+									local toSec =
+										CutsceneExport.parseExportTimeInput(endTxt, fps, fullDur)
 									if fromSec == nil or toSec == nil then
-										warn("[anima] 导出区间无效:请输入数字(帧或秒)")
+										warn(
+											"[anima] 导出区间无效:请输入数字(帧或秒)"
+										)
 										return
 									end
-									if fromSec < -EXPORT_TIME_EPS or toSec > fullDur + EXPORT_TIME_EPS or fromSec >= toSec - EXPORT_TIME_EPS then
+									if
+										fromSec < -EXPORT_TIME_EPS
+										or toSec > fullDur + EXPORT_TIME_EPS
+										or fromSec >= toSec - EXPORT_TIME_EPS
+									then
 										warn(
 											string.format(
 												"[anima] 导出区间无效:需满足 0 <= 起始 < 结束 <= %.2fs",
@@ -330,27 +347,49 @@ local function promptExportToPlace(gui: PluginGui)
 										)
 										return
 									end
-									local sliced, sliceWarnings = CutsceneExport.slice(cs, fromSec, toSec)
+									local sliced, sliceWarnings =
+										CutsceneExport.slice(cs, fromSec, toSec)
 									for _, w in sliceWarnings do
 										warn(w)
 									end
-									print(CutsceneExport.formatExportRangeLog(fromSec, toSec, fps, sliced.duration))
-									local ok, mod, reqPath = pcall(CutsceneExport.writeModule, sliced, subPath, moduleName)
+									print(
+										CutsceneExport.formatExportRangeLog(
+											fromSec,
+											toSec,
+											fps,
+											sliced.duration
+										)
+									)
+									local ok, mod, reqPath = pcall(
+										CutsceneExport.writeModule,
+										sliced,
+										subPath,
+										moduleName
+									)
 									if not ok or not mod then
 										warn(tostring(mod))
 										return
 									end
-									CutsceneExport.writeAnimaExportString((mod :: ModuleScript).Source)
+									CutsceneExport.writeAnimaExportString(
+										(mod :: ModuleScript).Source
+									)
 									state.name:set(moduleName)
+									lastSubPath =
+										table.concat(CutsceneExport.parseSubPath(subPath), "/")
 									ChangeHistoryService:SetWaypoint("Anima 导出过场")
 									Selection:Set({ mod :: ModuleScript })
 									EditorPersistence.clearDraft(plugin)
 									scheduleDraftSave()
-									local fileHint = CutsceneExport.suggestedFilePath(subPath, moduleName)
-									print(`[anima] 已导出 ModuleScript → ReplicatedStorage.{reqPath}`)
+									local fileHint =
+										CutsceneExport.suggestedFilePath(subPath, moduleName)
+									print(
+										`[anima] 已导出 ModuleScript → ReplicatedStorage.{reqPath}`
+									)
 									print(`[anima] 程序 require: ReplicatedStorage.{reqPath}`)
 									print(`[anima] Git/Rojo 建议路径: {fileHint}`)
-									print("[anima] 副本仍在 ReplicatedStorage.AnimaExport(供 MCP 写盘)")
+									print(
+										"[anima] 副本仍在 ReplicatedStorage.AnimaExport(供 MCP 写盘)"
+									)
 								end,
 							})
 						end,
@@ -491,41 +530,172 @@ local callbacks: App.Callbacks = {
 	end,
 
 	onImportMenu = function(gui: PluginGui)
-		ContextMenu.show(gui, {
-			{ kind = "header", text = "导入过场到 Timeline" },
-			{
-				text = "从 ReplicatedStorage.AnimaExport",
+		-- 过场浏览器:列出 Cutscenes 下全部已导出模块,点击即载入(菜单高度有限,超出走 Explorer 导入)
+		local MAX_BROWSER_ITEMS = 12
+		local items: { ContextMenu.Item } = {
+			{ kind = "header", text = "打开过场 · ReplicatedStorage.Anima.Cutscenes" },
+		}
+		local entries = CutsceneBrowser.list()
+		if #entries == 0 then
+			table.insert(
+				items,
+				{ text = "(还没有已导出的过场)", color = Theme.color.textDim }
+			)
+		end
+		for i, entry in entries do
+			if i > MAX_BROWSER_ITEMS then
+				table.insert(items, {
+					text = `…还有 {#entries - MAX_BROWSER_ITEMS} 个(用 Explorer 选中导入)`,
+					color = Theme.color.textDim,
+				})
+				break
+			end
+			table.insert(items, {
+				text = "📄 " .. entry.path,
 				onClick = function()
-					local holder = ReplicatedStorage:FindFirstChild("AnimaExport")
-					if not holder or not holder:IsA("StringValue") or holder.Value == "" then
-						warn("[anima] 找不到 AnimaExport 或为空,请先 💾 导出或粘贴源码")
+					local data = CutsceneBrowser.load(entry.module)
+					if not data then
+						warn(`[anima] 打开失败:{entry.path} 不是有效的 cutscene 模块`)
 						return
 					end
-					local parsed = Serializer.deserialize(holder.Value)
-					if not parsed then
-						warn("[anima] AnimaExport 内容无法解析")
-						return
-					end
-					applyImportedCutscene(parsed, "AnimaExport")
+					applyImportedCutscene(data, entry.path)
+					state.name:set(entry.module.Name)
+					lastSubPath = entry.subPath
 				end,
-			},
-			{
-				text = "从 Explorer 选中 ModuleScript",
-				onClick = function()
-					local sel = Selection:Get()
-					if #sel ~= 1 or not sel[1]:IsA("ModuleScript") then
-						warn("[anima] 请在 Explorer 中选中一个 cutscene ModuleScript")
-						return
-					end
-					local ok, data = pcall(require, sel[1])
-					if not ok or type(data) ~= "table" or type(data.tracks) ~= "table" then
-						warn("[anima] 所选模块不是有效的 cutscene 表")
-						return
-					end
-					applyImportedCutscene(data :: CutsceneFormat.Cutscene, sel[1].Name)
-				end,
-			},
-		}, { width = 260 })
+			})
+		end
+		-- Moon Animator 2 存档:提取相机轨(CFrame 关键帧+缓动+首帧 FOV)追加为独立相机轨
+		local moonSaves = MoonImport.findSaves()
+		if #moonSaves > 0 then
+			table.insert(items, { kind = "sep" })
+			table.insert(items, { kind = "header", text = "从 Moon Animator 导入相机轨" })
+			for i, save in moonSaves do
+				if i > 5 then
+					break
+				end
+				table.insert(items, {
+					text = "🌙 " .. save.Name,
+					onClick = function()
+						local parsed = MoonImport.parse(save)
+						if not parsed then
+							warn(`[anima] {save.Name} 里没有可解析的相机轨道`)
+							return
+						end
+						for _, camData in parsed.cameras do
+							if camData.lengthSec > state.duration:get() then
+								state:setDuration(camData.lengthSec)
+							end
+							local vcamName = VCamAuthoring.nextName()
+							local firstCf = camData.keyframes[1].value
+							-- gizmo 摆位:轨道跟随 Player 播放,把首帧按锚点换算到角色当前位置附近
+							local gizmoCf = firstCf
+							if parsed.anchorCf and parsed.liveAnchorCf then
+								gizmoCf = parsed.liveAnchorCf * parsed.anchorCf:ToObjectSpace(firstCf)
+							end
+							local part = VCamAuthoring.create(vcamName, gizmoCf)
+							if camData.fov then
+								part:SetAttribute("FOV", camData.fov)
+							end
+							local idx = state:addCameraTrack(vcamName, 0, camData.lengthSec, nil)
+							local tr = state.tracks:get()[idx]
+							tr.name = "🌙 " .. save.Name
+							-- 有创作锚点(MA2 里那只 Rig)→ 关键帧转成相对 key + 跟随 Player,
+							-- 播放时构图跟着实际角色走;找不到锚点则按世界坐标原样导入。
+							local anchorCf = parsed.anchorCf
+							if anchorCf then
+								tr.followBinding = "Player"
+							end
+							for _, kf in camData.keyframes do
+								table.insert(tr.keyframes :: any, {
+									t = kf.t,
+									value = if anchorCf
+										then anchorCf:ToObjectSpace(kf.value)
+										else kf.value,
+									easing = kf.easing,
+								})
+							end
+							if #camData.fovKeyframes >= 2 then
+								tr.fovKeyframes = {}
+								for _, kf in camData.fovKeyframes do
+									table.insert(tr.fovKeyframes :: any, {
+										t = kf.t,
+										value = kf.value,
+										easing = kf.easing,
+									})
+								end
+							end
+							state:commitTracks(true)
+							state.selectedTrack:set(idx)
+							local anchorNote
+							if parsed.anchorCf then
+								local dist = (firstCf.Position - parsed.anchorCf.Position).Magnitude
+								local src = if parsed.anchorSource == "save"
+									then "存档创作位姿"
+									else "场景当前位姿(存档无根运动轨,若 rig 被挪动过构图会偏)"
+								anchorNote =
+									`已按 '{parsed.anchorName}'({src})转为跟随 Player 的相对运镜 · 首帧距锚点 {string.format("%.1f", dist)} studs`
+							else
+								anchorNote = "世界坐标(未找到创作 Rig,无法转相对)"
+							end
+							print(
+								`[anima] 已导入 Moon 相机轨 '{save.Name}' → {vcamName} · {#camData.keyframes} 帧 · {anchorNote}`
+							)
+						end
+						-- 关节动画(20 spec):每 Rig 项一条 rigAnim 轨
+						for _, rig in parsed.rigs do
+							if rig.lengthSec > state.duration:get() then
+								state:setDuration(rig.lengthSec)
+							end
+							local idx = state:addTrack("rigAnim", rig.name, "🦴 " .. save.Name)
+							local tr = state.tracks:get()[idx]
+							tr.jointTracks = rig.jointTracks
+							state:commitTracks(true)
+							print(
+								`[anima] 已导入 Moon 关节动画 '{save.Name}' → '{rig.name}' · {#rig.jointTracks} 关节 · {string.format("%.2f", rig.lengthSec)}s(右键轨道可换绑)`
+							)
+						end
+					end,
+				})
+			end
+		end
+		table.insert(items, { kind = "sep" })
+		table.insert(items, { kind = "header", text = "导入过场到 Timeline" })
+		table.insert(items, {
+			text = "从 ReplicatedStorage.AnimaExport",
+			onClick = function()
+				local holder = ReplicatedStorage:FindFirstChild("AnimaExport")
+				if not holder or not holder:IsA("StringValue") or holder.Value == "" then
+					warn(
+						"[anima] 找不到 AnimaExport 或为空,请先 💾 导出或粘贴源码"
+					)
+					return
+				end
+				local parsed = Serializer.deserialize(holder.Value)
+				if not parsed then
+					warn("[anima] AnimaExport 内容无法解析")
+					return
+				end
+				applyImportedCutscene(parsed, "AnimaExport")
+			end,
+		})
+		table.insert(items, {
+			text = "从 Explorer 选中 ModuleScript",
+			onClick = function()
+				local sel = Selection:Get()
+				if #sel ~= 1 or not sel[1]:IsA("ModuleScript") then
+					warn("[anima] 请在 Explorer 中选中一个 cutscene ModuleScript")
+					return
+				end
+				local data = CutsceneBrowser.load(sel[1] :: ModuleScript)
+				if not data then
+					warn("[anima] 所选模块不是有效的 cutscene 表")
+					return
+				end
+				applyImportedCutscene(data, sel[1].Name)
+				state.name:set(sel[1].Name)
+			end,
+		})
+		ContextMenu.show(gui, items, { width = 300 })
 	end,
 
 	-- init 把内嵌预览挂进面板容器
@@ -650,9 +820,7 @@ local callbacks: App.Callbacks = {
 			cf = FollowAnchor.worldFromKeyframeCFrame(track, cf, bindingResolver)
 		end
 		local vcamName = track.target
-		if track.kind == "cameraMove" and vcamName ~= "" then
-			cameraAuthoring:snapViewport(vcamName, cf)
-		elseif track.kind == "camera" and vcamName ~= "" then
+		if (track.kind == "camera" or track.kind == "cameraMove") and vcamName ~= "" then
 			cameraAuthoring:snapViewport(vcamName, cf)
 		else
 			local cam = workspace.CurrentCamera
@@ -830,35 +998,37 @@ local function startCameraPath()
 	if pathPreviewInputConn then
 		pathPreviewInputConn:Disconnect()
 	end
-	pathPreviewInputConn = UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
-		if processed then
-			return
+	pathPreviewInputConn = UserInputService.InputBegan:Connect(
+		function(input: InputObject, processed: boolean)
+			if processed then
+				return
+			end
+			if input.UserInputType ~= Enum.UserInputType.MouseButton2 then
+				return
+			end
+			if not widget.Enabled or not cameraPath then
+				return
+			end
+			local sel = Selection:Get()
+			if #sel ~= 1 then
+				return
+			end
+			local inst = sel[1]
+			if not inst:IsA("BasePart") then
+				return
+			end
+			local root = workspace:FindFirstChild("AnimaCameraPath")
+			if not root or not inst:IsDescendantOf(root) then
+				return
+			end
+			local tangentFolder = root:FindFirstChild("TangentHandles")
+			if tangentFolder and inst:IsDescendantOf(tangentFolder) then
+				task.defer(function()
+					PathPreviewPrefs.showContextMenu(widget, plugin, rebuildCameraPathNow)
+				end)
+			end
 		end
-		if input.UserInputType ~= Enum.UserInputType.MouseButton2 then
-			return
-		end
-		if not widget.Enabled or not cameraPath then
-			return
-		end
-		local sel = Selection:Get()
-		if #sel ~= 1 then
-			return
-		end
-		local inst = sel[1]
-		if not inst:IsA("BasePart") then
-			return
-		end
-		local root = workspace:FindFirstChild("AnimaCameraPath")
-		if not root or not inst:IsDescendantOf(root) then
-			return
-		end
-		local tangentFolder = root:FindFirstChild("TangentHandles")
-		if tangentFolder and inst:IsDescendantOf(tangentFolder) then
-			task.defer(function()
-				PathPreviewPrefs.showContextMenu(widget, plugin, rebuildCameraPathNow)
-			end)
-		end
-	end)
+	)
 end
 
 local function stopCameraPath()
@@ -928,6 +1098,10 @@ Fusion.Observer(state.revision):onChange(function()
 	Preview.cutsceneRevision = state.revision:get()
 	scheduleDraftSave()
 	Preview.clearAnimationCache()
+	-- 后台补齐 clip 源时长(缓存命中零成本);解析到新时长后轻量重绘宽度(18 spec)
+	AnimationAsset.prefetchCutscene(getCutscene(), function()
+		state:commitTracks(false)
+	end)
 	if embeddedPreview then
 		embeddedPreview:refresh()
 	end
@@ -937,6 +1111,11 @@ Fusion.Observer(state.revision):onChange(function()
 	if cameraPath then
 		cameraPath:rebuild(getCutscene(), selectedTrackObj(), cameraPathRebuildOpts())
 	end
+end)
+
+-- 启动装载(含草稿恢复)不经 revision observer,补一次初始预取(18 spec)
+AnimationAsset.prefetchCutscene(getCutscene(), function()
+	state:commitTracks(false)
 end)
 
 -- 拖播放头 / 播放时:场景 Rig 动画预览(主视口跟随开启时由 LivePreview 统一驱动,避免双份)。
@@ -968,7 +1147,7 @@ UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: 
 	if m.X < 0 or m.Y < 0 or m.X > sz.X or m.Y > sz.Y then
 		return
 	end
-	-- 空格 / Enter:播放暂停(面板聚焦、非输入态)
+	-- 空格 / Enter:播放暂停(仅鼠标在时间轴面板内;TextBox 输入态 gameProcessed=true 已被上面挡掉)
 	if input.KeyCode == Enum.KeyCode.Space or input.KeyCode == Enum.KeyCode.Return then
 		callbacks.onPlayPause()
 		return

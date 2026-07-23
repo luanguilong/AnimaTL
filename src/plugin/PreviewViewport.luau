@@ -21,6 +21,7 @@ local CutsceneFormat = require(Shared.CutsceneFormat)
 local SceneResolver = require(script.Parent.SceneResolver)
 local AnimationPreview = require(script.Parent.AnimationPreview)
 local MediaPreview = require(script.Parent.MediaPreview)
+local PropertyPreview = require(script.Parent.PropertyPreview)
 local ViewportFxFeedback = require(script.Parent.ViewportFxFeedback)
 
 local PreviewViewport = {}
@@ -224,7 +225,13 @@ end
 local function collectTargets(cutscene: CutsceneFormat.Cutscene): { string }
 	local set: { [string]: boolean } = {}
 	for _, track in cutscene.tracks do
-		if track.kind == "transform" or track.kind == "animation" or track.kind == "effect" or track.kind == "sound" then
+		if
+			track.kind == "transform"
+			or track.kind == "animation"
+			or track.kind == "effect"
+			or track.kind == "sound"
+			or track.kind == "property"
+		then
 			set[track.target] = true
 		elseif track.kind == "camera" and track.followBinding and track.followBinding ~= "" then
 			set[track.followBinding] = true
@@ -256,6 +263,7 @@ function PreviewViewport.rebuild(self: PreviewViewport, cutscene: CutsceneFormat
 	self._clones = {}
 	self._lastMediaT = 0
 	MediaPreview.reset("viewport")
+	PropertyPreview.restore("viewport")
 	AnimationPreview.clearCache(self._animTracks)
 	if self._ground then
 		self._ground:Destroy()
@@ -300,9 +308,9 @@ local function evalCamera(
 	t: number,
 	resolveBinding: CutsceneFormat.BindingResolver?
 ): (CFrame?, number?, string?)
-	local cf, name = CameraDirector.evaluate(cutscene, t, resolveBinding)
-	local fov: number? = nil
-	if name then
+	local cf, name, trackFov = CameraDirector.evaluate(cutscene, t, resolveBinding)
+	local fov: number? = trackFov
+	if not fov and name then
 		local part = VCam.find(name)
 		local f = part and part:GetAttribute("FOV")
 		if typeof(f) == "number" then
@@ -313,7 +321,12 @@ local function evalCamera(
 end
 
 -- 更新一帧:相机 + transform 克隆 + 动画定帧 + 信息叠加。
-function PreviewViewport.update(self: PreviewViewport, cutscene: CutsceneFormat.Cutscene, t: number, stepDt: number?)
+function PreviewViewport.update(
+	self: PreviewViewport,
+	cutscene: CutsceneFormat.Cutscene,
+	t: number,
+	stepDt: number?
+)
 	-- 跟随对齐:每个克隆源只对齐一次(多 binding 名指向同一 Rig 时不重复 Pivot)。
 	local syncedClone: { [Instance]: boolean } = {}
 	for _, track in cutscene.tracks do
@@ -337,6 +350,9 @@ function PreviewViewport.update(self: PreviewViewport, cutscene: CutsceneFormat.
 		string.format("🎥 %s · FOV %d · %.2fs", active or "—", math.floor(fov or 70), t)
 
 	for _, track in cutscene.tracks do
+		if track.hidden then
+			continue
+		end
 		if track.kind == "transform" and track.keyframes and #track.keyframes > 0 then
 			local clone = self._clones[track.target]
 			if clone then
@@ -354,10 +370,17 @@ function PreviewViewport.update(self: PreviewViewport, cutscene: CutsceneFormat.
 
 	-- 动画轨:在克隆角色上定帧
 	for _, track in cutscene.tracks do
-		if track.kind == "animation" and track.clips then
+		if track.kind == "animation" and track.clips and not track.hidden then
 			local clone = self._clones[track.target]
 			if clone and clone:IsA("Model") then
-				AnimationPreview.stepClipsOnModel(clone, track.target, track.clips, t, self._animTracks, stepDt)
+				AnimationPreview.stepClipsOnModel(
+					clone,
+					track.target,
+					track.clips,
+					t,
+					self._animTracks,
+					stepDt
+				)
 			end
 		end
 	end
@@ -385,6 +408,7 @@ function PreviewViewport.update(self: PreviewViewport, cutscene: CutsceneFormat.
 		cutsceneRevision = if self._getRevision then self._getRevision() else nil,
 		viewportFrame = self.vf,
 	})
+	PropertyPreview.apply(cutscene, t, resolveInViewport, "viewport")
 	self._lastMediaT = t
 end
 

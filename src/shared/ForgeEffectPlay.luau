@@ -27,6 +27,7 @@ end
 -- 优先 shared.vfx(已由游戏侧 init);否则 require 注入的 ForgeVFX ModuleScript。
 function ForgeEffectPlay.resolveApi(forgeVfxModule: ModuleScript?): any?
 	if RunService:IsClient() then
+		-- selene: allow(global_usage) -- forge 官方 API 即挂在 shared.vfx
 		local sharedVfx = rawget(shared, "vfx")
 		if isForgeApi(sharedVfx) then
 			ForgeEffectPlay.ensureInit(sharedVfx)

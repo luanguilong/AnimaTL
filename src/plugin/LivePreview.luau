@@ -43,9 +43,9 @@ local function evalCamera(
 	t: number,
 	resolveBinding: CutsceneFormat.BindingResolver?
 ): (CFrame?, number?)
-	local cf, name = CameraDirector.evaluate(cutscene, t, resolveBinding)
-	local fov: number? = nil
-	if name then
+	local cf, name, trackFov = CameraDirector.evaluate(cutscene, t, resolveBinding)
+	local fov: number? = trackFov
+	if not fov and name then
 		local part = VCam.find(name)
 		local f = part and part:GetAttribute("FOV")
 		if typeof(f) == "number" then
@@ -56,7 +56,11 @@ local function evalCamera(
 end
 
 -- 应用一帧:相机 + transform 物体。
-function LivePreview.applyFrame(self: LivePreview, getCutscene: () -> CutsceneFormat.Cutscene, getTime: () -> number)
+function LivePreview.applyFrame(
+	self: LivePreview,
+	getCutscene: () -> CutsceneFormat.Cutscene,
+	getTime: () -> number
+)
 	local cutscene = getCutscene()
 	local t = getTime()
 	local camCF, fov = evalCamera(cutscene, t, self._resolveBinding)

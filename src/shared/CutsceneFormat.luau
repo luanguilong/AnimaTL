@@ -15,7 +15,19 @@ local CutsceneFormat = {}
 -- 轨道类型
 --   cameraMove: 用 keyframes(CFrame) 驱动某台 vcam(target=vcam 名)自己的运动。
 --   相机求值时若某 vcam 有 cameraMove 轨则采样它、否则用静态机位。
-export type TrackKind = "animation" | "camera" | "transform" | "event" | "cameraMove" | "sound" | "effect"
+export type TrackKind =
+	"animation"
+	| "camera"
+	| "transform"
+	| "event"
+	| "cameraMove"
+	| "sound"
+	| "effect"
+	| "property"
+	| "rigAnim"
+
+-- 数据契约版本(17 spec):无 formatVersion 字段的旧数据视为 1;property 轨落地起为 2。
+CutsceneFormat.FORMAT_VERSION = 2
 
 -- 缓动名(见 Easing.luau)
 export type EasingName = "linear" | "quadIn" | "quadOut" | "quadInOut" | "cubicInOut" | "sine"
@@ -38,6 +50,13 @@ export type Keyframe = {
 	-- camera / cameraMove 贝塞尔(07):相对锚点位置的切线 offset;缺省 = 直线段
 	outTangent: Vector3?,
 	inTangent: Vector3?,
+}
+
+-- FOV 关键帧(camera 轨可选):到达 t 时视野角为 value,easing 同 CFrame 关键帧语义。
+export type FovKeyframe = {
+	t: number,
+	value: number,
+	easing: EasingName?,
 }
 
 -- 事件点:到达 t 时触发一个具名信号,payload 交给 EventTrack 的处理器。
@@ -78,6 +97,25 @@ function CutsceneFormat.effectEmitMode(cue: EffectCue): EffectEmitMode
 	return "particle"
 end
 
+-- 属性轨(17 spec):K 任意 Instance 属性。V1 值类型:number/Vector3/Color3 插值,
+-- boolean 阶梯(到 key 即切换)。EnumItem/Sequence 等留 V2(阶梯)。
+export type PropValue = number | boolean | Vector3 | Color3
+
+-- 预留:V2 支持 K Attribute;V1 恒 "property"。
+export type PropertyKind = "property" | "attribute"
+
+export type PropKeyframe = {
+	t: number,
+	value: PropValue,
+	easing: EasingName?, -- 到达本帧的缓动;不可插值类型忽略
+}
+
+-- 值是否可插值(number/Vector3/Color3);false = 阶梯
+function CutsceneFormat.propValueLerpable(v: any): boolean
+	local tn = typeof(v)
+	return tn == "number" or tn == "Vector3" or tn == "Color3"
+end
+
 -- 动画片段仅适用于该 Rig;nil = R6 与 R15 均匹配(兼容旧数据)。见 08 spec。
 export type RigTypeName = "R6" | "R15"
 
@@ -92,6 +130,13 @@ export type AnimationClip = {
 	rigType: RigTypeName?, -- 缺省 nil = 不限 Rig
 }
 
+-- 关节动画轨(20 spec):Moon 导入的逐关节 Motor6D.Transform 关键帧。
+-- path = 关节路径(尾段 = Motor6D.Part1 名);value = Transform 偏移(相对静止位姿)。
+export type JointTrack = {
+	path: string,
+	keyframes: { Keyframe },
+}
+
 -- 相机轨的一个生效区间段(同一台相机可在一条轨上有多个不连续的段)。
 export type CameraSegment = {
 	from: number, -- 段起(秒)
@@ -104,6 +149,7 @@ export type Track = {
 	target: Binding, -- 作用目标的逻辑名
 	name: string?, -- 便于阅读/UI 显示
 	group: string?, -- 所属对象分组名(UE Sequencer 式;纯组织用,运行时忽略)
+	hidden: boolean?, -- true = 隐藏/静音:编辑预览与运行时播放都跳过本轨(数据仍保留)
 
 	-- kind == "camera"(每相机独立轨模型):一个或多个生效区间段 + 可选运动关键帧。target = vcam 名。
 	-- 求值时覆盖 t(落在任一段内)的相机轨中"时间轴最上层"那条上镜;有 keyframes 则驱动该相机运动,
@@ -121,6 +167,9 @@ export type Track = {
 	-- kind == "camera" | "transform" | "cameraMove" 时用:
 	keyframes: { Keyframe }?,
 
+	-- kind == "camera" 时可选:FOV 关键帧(上镜期间驱动 FieldOfView;无则用 vcam 的 FOV attribute)
+	fovKeyframes: { FovKeyframe }?,
+
 	-- kind == "animation" 时用:
 	clips: { AnimationClip }?,
 
@@ -132,6 +181,16 @@ export type Track = {
 
 	-- kind == "effect" 时用:
 	effectCues: { EffectCue }?,
+
+	-- kind == "property" 时用(17 spec):
+	propertyName: string?, -- 目标实例上的属性名(一轨一属性)
+	propertyKind: PropertyKind?, -- 缺省 "property"(V1 仅此)
+	propKeyframes: { PropKeyframe }?,
+	keepOnDone: boolean?, -- true = 播完保留终值;缺省 false = stop 时还原原值
+
+	-- kind == "rigAnim" 时用(20 spec):target = 角色绑定。
+	-- 注意:同一角色勿与 animation 轨同播(Animator 每帧也写 Transform,互踩)。
+	jointTracks: { JointTrack }?,
 }
 
 -- 一个完整过场
@@ -139,6 +198,9 @@ export type Cutscene = {
 	name: string,
 	duration: number, -- 总时长(秒)
 	tracks: { Track },
+
+	-- 可选:数据契约版本;nil = 1(property 轨之前的旧数据)。见 FORMAT_VERSION。
+	formatVersion: number?,
 
 	-- 可选:编辑时的帧率(时间轴显示/吸附用;运行时按秒播,与此无关)。缺省 30。
 	fps: number?,
@@ -201,7 +263,9 @@ function CutsceneFormat.clipsForRig(
 			if seenStartAt[clip.startAt] then
 				if not warnedDup then
 					warnedDup = true
-					warn(`[anima] 同 startAt 多条 clip 匹配 Rig {rigType.Name},仅使用第一条`)
+					warn(
+						`[anima] 同 startAt 多条 clip 匹配 Rig {rigType.Name},仅使用第一条`
+					)
 				end
 				continue
 			end
@@ -233,7 +297,11 @@ function CutsceneFormat.clipTimelineEnd(
 end
 
 -- 窗口内相对源动画的 TimePosition(秒),供预览定帧。
-function CutsceneFormat.clipTimePositionAt(clip: AnimationClip, t: number, sourceAnimSec: number): number
+function CutsceneFormat.clipTimePositionAt(
+	clip: AnimationClip,
+	t: number,
+	sourceAnimSec: number
+): number
 	if t < clip.startAt then
 		return 0
 	end

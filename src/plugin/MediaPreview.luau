@@ -69,7 +69,7 @@ local function resetPreviewTracks(
 	table.clear(ctx.previewSoundTracks)
 	table.clear(ctx.previewEffectTracks)
 	for _, track in cutscene.tracks do
-		if not trackIncludedInStep(track.kind, options) then
+		if track.hidden or not trackIncludedInStep(track.kind, options) then
 			continue
 		end
 		if track.kind == "sound" then

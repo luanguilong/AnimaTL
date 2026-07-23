@@ -32,6 +32,38 @@ local function vector3(v: Vector3): string
 	return string.format("Vector3.new(%s, %s, %s)", num(v.X), num(v.Y), num(v.Z))
 end
 
+-- 属性值 → 构造表达式(17 spec:number/boolean/Vector3/Color3;Color3.new 保精度)
+local function propValue(v: CutsceneFormat.PropValue): string?
+	local tn = typeof(v)
+	if tn == "number" then
+		return num(v :: number)
+	end
+	if tn == "boolean" then
+		return tostring(v)
+	end
+	if tn == "Vector3" then
+		return vector3(v :: Vector3)
+	end
+	if tn == "Color3" then
+		local c = v :: Color3
+		return string.format("Color3.new(%s, %s, %s)", num(c.R), num(c.G), num(c.B))
+	end
+	return nil
+end
+
+local function propKeyframe(kf: CutsceneFormat.PropKeyframe, indent: string): string?
+	local valueSrc = propValue(kf.value)
+	if not valueSrc then
+		warn(`[anima] Serializer:属性关键帧值类型 {typeof(kf.value)} 不支持,已跳过`)
+		return nil
+	end
+	local fields = { "t = " .. num(kf.t), "value = " .. valueSrc }
+	if kf.easing then
+		table.insert(fields, "easing = " .. str(kf.easing))
+	end
+	return indent .. "{ " .. table.concat(fields, ", ") .. " },"
+end
+
 local function keyframe(kf: CutsceneFormat.Keyframe, indent: string): string
 	local fields = { "t = " .. num(kf.t) }
 	if kf.value then
@@ -71,6 +103,35 @@ end
 
 local function event(ev: CutsceneFormat.CutsceneEvent, indent: string): string
 	local f = { "t = " .. num(ev.t), "name = " .. str(ev.name) }
+	-- payload:仅 string/number/boolean 值;键排序保证输出稳定(19 spec)
+	if ev.payload then
+		local keys = {}
+		for k in ev.payload do
+			table.insert(keys, k)
+		end
+		table.sort(keys)
+		local parts = {}
+		for _, k in keys do
+			local v = ev.payload[k]
+			local tn = typeof(v)
+			local valueSrc: string?
+			if tn == "number" then
+				valueSrc = num(v)
+			elseif tn == "boolean" then
+				valueSrc = tostring(v)
+			elseif tn == "string" then
+				valueSrc = str(v)
+			else
+				warn(`[anima] Serializer:事件 '{ev.name}' payload.{k} 类型 {tn} 不支持,已跳过`)
+			end
+			if valueSrc then
+				table.insert(parts, string.format("[%s] = %s", str(k), valueSrc))
+			end
+		end
+		if #parts > 0 then
+			table.insert(f, "payload = { " .. table.concat(parts, ", ") .. " }")
+		end
+	end
 	return indent .. "{ " .. table.concat(f, ", ") .. " },"
 end
 
@@ -129,6 +190,9 @@ local function track(tr: CutsceneFormat.Track, indent: string): string
 	if tr.group then
 		table.insert(lines, i2 .. "group = " .. str(tr.group) .. ",")
 	end
+	if tr.hidden then
+		table.insert(lines, i2 .. "hidden = true,")
+	end
 	if tr.segments and #tr.segments > 0 then
 		table.insert(lines, i2 .. "segments = {")
 		for _, s in tr.segments do
@@ -161,6 +225,17 @@ local function track(tr: CutsceneFormat.Track, indent: string): string
 		end
 		table.insert(lines, i2 .. "},")
 	end
+	if tr.fovKeyframes and #tr.fovKeyframes > 0 then
+		table.insert(lines, i2 .. "fovKeyframes = {")
+		for _, kf in tr.fovKeyframes do
+			local f = { "t = " .. num(kf.t), "value = " .. num(kf.value) }
+			if kf.easing then
+				table.insert(f, "easing = " .. str(kf.easing))
+			end
+			table.insert(lines, i3 .. "{ " .. table.concat(f, ", ") .. " },")
+		end
+		table.insert(lines, i2 .. "},")
+	end
 	if tr.clips and #tr.clips > 0 then
 		table.insert(lines, i2 .. "clips = {")
 		for _, c in tr.clips do
@@ -189,6 +264,40 @@ local function track(tr: CutsceneFormat.Track, indent: string): string
 		end
 		table.insert(lines, i2 .. "},")
 	end
+	if tr.propertyName and tr.propertyName ~= "" then
+		table.insert(lines, i2 .. "propertyName = " .. str(tr.propertyName) .. ",")
+	end
+	if tr.propertyKind == "attribute" then
+		table.insert(lines, i2 .. 'propertyKind = "attribute",')
+	end
+	if tr.keepOnDone then
+		table.insert(lines, i2 .. "keepOnDone = true,")
+	end
+	if tr.propKeyframes and #tr.propKeyframes > 0 then
+		table.insert(lines, i2 .. "propKeyframes = {")
+		for _, kf in tr.propKeyframes do
+			local line = propKeyframe(kf, i3)
+			if line then
+				table.insert(lines, line)
+			end
+		end
+		table.insert(lines, i2 .. "},")
+	end
+	if tr.jointTracks and #tr.jointTracks > 0 then
+		local i4 = i3 .. "\t"
+		table.insert(lines, i2 .. "jointTracks = {")
+		for _, jt in tr.jointTracks do
+			table.insert(lines, i3 .. "{")
+			table.insert(lines, i4 .. "path = " .. str(jt.path) .. ",")
+			table.insert(lines, i4 .. "keyframes = {")
+			for _, kf in jt.keyframes do
+				table.insert(lines, keyframe(kf, i4 .. "\t"))
+			end
+			table.insert(lines, i4 .. "},")
+			table.insert(lines, i3 .. "},")
+		end
+		table.insert(lines, i2 .. "},")
+	end
 	table.insert(lines, indent .. "},")
 	return table.concat(lines, "\n")
 end
@@ -201,6 +310,7 @@ function Serializer.serialize(cutscene: CutsceneFormat.Cutscene): string
 		"",
 		"local cutscene = {",
 		"\tname = " .. str(cutscene.name) .. ",",
+		"\tformatVersion = " .. num(CutsceneFormat.FORMAT_VERSION) .. ",",
 		"\tduration = " .. num(cutscene.duration) .. ",",
 		"\tfps = " .. num(cutscene.fps or 30) .. ",",
 		"\ttakeCameraControl = " .. tostring(cutscene.takeCameraControl ~= false) .. ",",

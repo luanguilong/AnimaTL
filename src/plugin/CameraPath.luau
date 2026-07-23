@@ -19,7 +19,6 @@ CameraPath.__index = CameraPath
 
 local FOLDER = "AnimaCameraPath"
 local STEP = 0.1 -- 采样步长(秒)
-local MAX_SEG = 240 -- 段数上限
 
 -- 机位把手被 Studio 工具挪动后的回报(指向具体轨 + keyframes 序号)
 export type HandleEdit = { track: CutsceneFormat.Track, kfIndex: number, cf: CFrame }

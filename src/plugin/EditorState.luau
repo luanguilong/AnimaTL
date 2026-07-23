@@ -25,6 +25,7 @@ local TimelineUnity = require(script.Parent.TimelineUnity)
 type Snapshot = {
 	name: string,
 	duration: number,
+	fps: number,
 	tracks: { CutsceneFormat.Track },
 }
 
@@ -60,6 +61,13 @@ local function cloneTrack(tr: CutsceneFormat.Track): CutsceneFormat.Track
 			})
 		end
 	end
+	local fovKf = nil
+	if tr.fovKeyframes then
+		fovKf = {}
+		for _, k in tr.fovKeyframes do
+			table.insert(fovKf, { t = k.t, value = k.value, easing = k.easing })
+		end
+	end
 	local clips = nil
 	if tr.clips then
 		clips = {}
@@ -79,7 +87,12 @@ local function cloneTrack(tr: CutsceneFormat.Track): CutsceneFormat.Track
 	if tr.events then
 		events = {}
 		for _, ev in tr.events do
-			table.insert(events, { t = ev.t, name = ev.name, payload = ev.payload })
+			table.insert(events, {
+				t = ev.t,
+				name = ev.name,
+				-- 浅拷贝隔离 undo 快照(值全是标量;19 spec)
+				payload = if ev.payload then table.clone(ev.payload) else nil,
+			})
 		end
 	end
 	local soundCues = nil
@@ -112,6 +125,24 @@ local function cloneTrack(tr: CutsceneFormat.Track): CutsceneFormat.Track
 			})
 		end
 	end
+	local jointTracks = nil
+	if tr.jointTracks then
+		jointTracks = {}
+		for _, jt in tr.jointTracks do
+			local jkf = {}
+			for _, k in jt.keyframes do
+				table.insert(jkf, { t = k.t, value = k.value, easing = k.easing })
+			end
+			table.insert(jointTracks, { path = jt.path, keyframes = jkf })
+		end
+	end
+	local propKf = nil
+	if tr.propKeyframes then
+		propKf = {}
+		for _, k in tr.propKeyframes do
+			table.insert(propKf, { t = k.t, value = k.value, easing = k.easing })
+		end
+	end
 	-- 相机轨:深拷贝 segments;旧单 from/to 迁移成一段(之后 from/to 不再使用)。
 	local segments = nil
 	if tr.segments then
@@ -127,6 +158,7 @@ local function cloneTrack(tr: CutsceneFormat.Track): CutsceneFormat.Track
 		target = tr.target,
 		name = tr.name,
 		group = tr.group,
+		hidden = tr.hidden,
 		segments = segments,
 		from = if segments then nil else tr.from,
 		to = if segments then nil else tr.to,
@@ -135,10 +167,16 @@ local function cloneTrack(tr: CutsceneFormat.Track): CutsceneFormat.Track
 		followBinding = tr.followBinding,
 		followPart = tr.followPart,
 		keyframes = kf,
+		fovKeyframes = fovKf,
 		clips = clips,
 		events = events,
 		soundCues = soundCues,
 		effectCues = effectCues,
+		propertyName = tr.propertyName,
+		propertyKind = tr.propertyKind,
+		propKeyframes = propKf,
+		keepOnDone = tr.keepOnDone,
+		jointTracks = jointTracks,
 	}
 end
 
@@ -191,6 +229,7 @@ function EditorState.snapshot(self: EditorState): Snapshot
 	return {
 		name = self.name:get(),
 		duration = self.duration:get(),
+		fps = self.fps:get(),
 		tracks = cloneTracks(self.tracks:get()),
 	}
 end
@@ -209,6 +248,7 @@ end
 local function applySnapshot(self: EditorState, snap: Snapshot)
 	self.name:set(snap.name)
 	self.duration:set(snap.duration)
+	self.fps:set(snap.fps or 30)
 	self.tracks:set(snap.tracks)
 	self.revision:set(self.revision:get() + 1)
 	-- 播放头夹回新时长
@@ -259,8 +299,12 @@ function EditorState.addTrack(
 ): number
 	self:pushUndo()
 	local tracks = self.tracks:get()
-	local track: CutsceneFormat.Track =
-		{ kind = kind, target = target, name = name or TimelineUnity.defaultTrackName(kind), group = group }
+	local track: CutsceneFormat.Track = {
+		kind = kind,
+		target = target,
+		name = name or TimelineUnity.defaultTrackName(kind),
+		group = group,
+	}
 	if kind == "transform" or kind == "cameraMove" then
 		track.keyframes = {}
 	elseif kind == "animation" then
@@ -271,6 +315,10 @@ function EditorState.addTrack(
 		track.soundCues = {}
 	elseif kind == "effect" then
 		track.effectCues = {}
+	elseif kind == "property" then
+		track.propKeyframes = {}
+	elseif kind == "rigAnim" then
+		track.jointTracks = {}
 	end
 	-- 注:kind == "camera" 走 addCameraTrack(独立轨,含 from/to);此处不再造 shots 轨。
 	table.insert(tracks, track)
@@ -531,6 +579,36 @@ function EditorState.removeTrack(self: EditorState, track: CutsceneFormat.Track)
 	end
 end
 
+-- 隐藏/显示轨道(隐藏 = 预览与运行时都跳过;数据保留)。
+function EditorState.setTrackHidden(self: EditorState, track: CutsceneFormat.Track, hidden: boolean)
+	self:pushUndo()
+	track.hidden = if hidden then true else nil
+	self:commitTracks(true)
+end
+
+-- 上下移动轨道顺序(delta=-1 上移 / 1 下移)。相机轨顺序即上镜优先级(越上层越优先)。
+function EditorState.moveTrack(self: EditorState, track: CutsceneFormat.Track, delta: number)
+	local tracks = self.tracks:get()
+	local idx = table.find(tracks, track)
+	if not idx then
+		return
+	end
+	local newIdx = idx + delta
+	if newIdx < 1 or newIdx > #tracks then
+		return
+	end
+	self:pushUndo()
+	table.remove(tracks, idx)
+	table.insert(tracks, newIdx, track)
+	local sel = self.selectedTrack:get()
+	if sel == idx then
+		self.selectedTrack:set(newIdx)
+	elseif sel == newIdx then
+		self.selectedTrack:set(idx)
+	end
+	self:commitTracks(true)
+end
+
 function EditorState.renameTrack(self: EditorState, track: CutsceneFormat.Track, name: string)
 	self:pushUndo()
 	track.name = name
@@ -568,7 +646,8 @@ function EditorState.setCameraFollow(
 				kf.value = FollowAnchor.worldFromKeyframeCFrame(track, kf.value, resolver)
 			end
 			if kf.outTangent then
-				kf.outTangent = FollowAnchor.storedOffsetToWorldDelta(track, kf.outTangent, resolver)
+				kf.outTangent =
+					FollowAnchor.storedOffsetToWorldDelta(track, kf.outTangent, resolver)
 			end
 			if kf.inTangent then
 				kf.inTangent = FollowAnchor.storedOffsetToWorldDelta(track, kf.inTangent, resolver)
@@ -585,7 +664,8 @@ function EditorState.setCameraFollow(
 				kf.value = FollowAnchor.storeKeyframeCFrame(track, kf.value, resolver)
 			end
 			if kf.outTangent then
-				kf.outTangent = FollowAnchor.worldDeltaToStoredOffset(track, kf.outTangent, resolver)
+				kf.outTangent =
+					FollowAnchor.worldDeltaToStoredOffset(track, kf.outTangent, resolver)
 			end
 			if kf.inTangent then
 				kf.inTangent = FollowAnchor.worldDeltaToStoredOffset(track, kf.inTangent, resolver)
@@ -788,6 +868,191 @@ function EditorState.setEasing(
 	self:commitTracks(true)
 end
 
+--========================= 属性轨(17 spec) =========================--
+
+local SUPPORTED_PROP_TYPES: { [string]: boolean } = {
+	number = true,
+	boolean = true,
+	Vector3 = true,
+	Color3 = true,
+}
+
+-- 读目标实例上的属性当前值;失败返回 nil + 原因。
+function EditorState.readPropertyValue(
+	target: string,
+	propertyName: string
+): (CutsceneFormat.PropValue?, string?)
+	local inst = SceneResolver.resolve(target)
+	if not inst then
+		return nil, `找不到绑定 '{target}'`
+	end
+	local ok, v = pcall(function()
+		return (inst :: any)[propertyName]
+	end)
+	if not ok then
+		return nil, `'{inst.Name}' 上读不到属性 '{propertyName}'`
+	end
+	if not SUPPORTED_PROP_TYPES[typeof(v)] then
+		return nil, `属性 '{propertyName}' 类型 {typeof(v)} 暂不支持(V1:number/boolean/Vector3/Color3)`
+	end
+	return v :: CutsceneFormat.PropValue, nil
+end
+
+-- 新建属性轨。建轨即校验:属性读不到/类型不支持就地拒绝(17 spec)。
+-- 返回 (索引, nil) 或 (nil, 错误信息)。
+function EditorState.addPropertyTrack(
+	self: EditorState,
+	target: string,
+	propertyName: string,
+	group: string?
+): (number?, string?)
+	if propertyName == "FieldOfView" then
+		return nil, "相机 FOV 请用相机轨的 FOV 关键帧,不走属性轨"
+	end
+	local value, err = EditorState.readPropertyValue(target, propertyName)
+	if err then
+		return nil, err
+	end
+	self:pushUndo()
+	local tracks = self.tracks:get()
+	table.insert(tracks, {
+		kind = "property" :: CutsceneFormat.TrackKind,
+		target = target,
+		name = TimelineUnity.defaultTrackName("property"),
+		group = group,
+		propertyName = propertyName,
+		propKeyframes = {
+			-- 首帧 = 当前值:轨道一建立即有可见语义(t=0 保持原状)
+			{ t = 0, value = value :: CutsceneFormat.PropValue },
+		},
+	})
+	self:commitTracks(true)
+	return #tracks, nil
+end
+
+local function sortPropKeyframes(track: CutsceneFormat.Track)
+	if track.propKeyframes then
+		table.sort(track.propKeyframes, function(a, b)
+			return a.t < b.t
+		end)
+	end
+end
+
+local function upsertPropKeyframe(
+	track: CutsceneFormat.Track,
+	t: number,
+	value: CutsceneFormat.PropValue,
+	easing: CutsceneFormat.EasingName?
+)
+	local kfs = track.propKeyframes
+	if not kfs then
+		kfs = {}
+		track.propKeyframes = kfs
+	end
+	assert(kfs, "propKeyframes 初始化失败")
+	for _, k in kfs do
+		if math.abs(k.t - t) < 1e-3 then
+			k.value = value
+			k.easing = easing or k.easing
+			return
+		end
+	end
+	table.insert(kfs, { t = t, value = value, easing = easing })
+	sortPropKeyframes(track)
+end
+
+-- 属性轨打帧。value=nil → 读目标当前值("以当前值打帧",Record 式手感)。
+function EditorState.capturePropFrame(
+	self: EditorState,
+	track: CutsceneFormat.Track,
+	value: CutsceneFormat.PropValue?,
+	t: number?
+): string?
+	if track.kind ~= "property" or not track.propertyName then
+		return "非属性轨"
+	end
+	local v = value
+	if v == nil then
+		local read, err = EditorState.readPropertyValue(track.target, track.propertyName)
+		if err then
+			return err
+		end
+		v = read
+	end
+	self:pushUndo()
+	upsertPropKeyframe(track, t or self.currentTime:get(), v :: CutsceneFormat.PropValue, nil)
+	self:commitTracks(true)
+	return nil
+end
+
+function EditorState.removePropKeyframe(
+	self: EditorState,
+	track: CutsceneFormat.Track,
+	kf: CutsceneFormat.PropKeyframe
+)
+	if not track.propKeyframes then
+		return
+	end
+	for i, k in track.propKeyframes do
+		if k == kf then
+			self:pushUndo()
+			table.remove(track.propKeyframes, i)
+			self:commitTracks(true)
+			return
+		end
+	end
+end
+
+function EditorState.duplicatePropKeyframe(
+	self: EditorState,
+	track: CutsceneFormat.Track,
+	kf: CutsceneFormat.PropKeyframe
+)
+	if not track.propKeyframes then
+		return
+	end
+	self:pushUndo()
+	local t = math.min(kf.t + 0.5, self.duration:get())
+	upsertPropKeyframe(track, t, kf.value, kf.easing)
+	self:commitTracks(true)
+end
+
+-- 拖拽:移动属性关键帧时间(不压快照;结束调 finishPropDrag 排序)
+function EditorState.movePropKeyframe(
+	self: EditorState,
+	kf: CutsceneFormat.PropKeyframe,
+	newT: number
+)
+	kf.t = math.clamp(newT, 0, self.duration:get())
+	self:commitTracks(false)
+end
+
+function EditorState.finishPropDrag(self: EditorState, track: CutsceneFormat.Track)
+	sortPropKeyframes(track)
+	self:commitTracks(true)
+end
+
+function EditorState.setTrackKeepOnDone(
+	self: EditorState,
+	track: CutsceneFormat.Track,
+	keep: boolean
+)
+	self:pushUndo()
+	track.keepOnDone = if keep then true else nil
+	self:commitTracks(true)
+end
+
+function EditorState.setPropKeyframeValue(
+	self: EditorState,
+	_track: CutsceneFormat.Track,
+	kf: CutsceneFormat.PropKeyframe,
+	value: CutsceneFormat.PropValue
+)
+	self:pushUndo()
+	kf.value = value
+	self:commitTracks(true)
+end
+
 --========================= 动画片段(clip)编辑 =========================--
 
 local AnimationAsset = require(script.Parent.AnimationAsset)
@@ -797,7 +1062,11 @@ local function minClipSec(fps: number): number
 end
 
 -- 同轨 clip 不重叠;保证 endAt > startAt。
-local function resolveClipOverlaps(clips: { CutsceneFormat.AnimationClip }, dur: number, fps: number)
+local function resolveClipOverlaps(
+	clips: { CutsceneFormat.AnimationClip },
+	dur: number,
+	fps: number
+)
 	table.sort(clips, function(a, b)
 		return a.startAt < b.startAt
 	end)
@@ -844,6 +1113,19 @@ local function trackContentEnd(tr: CutsceneFormat.Track): number
 		for _, c in tr.clips do
 			local endT = c.endAt or (c.startAt + 1.5)
 			maxT = math.max(maxT, c.startAt, endT)
+		end
+	end
+	if tr.propKeyframes then
+		for _, k in tr.propKeyframes do
+			maxT = math.max(maxT, k.t)
+		end
+	end
+	if tr.jointTracks then
+		for _, jt in tr.jointTracks do
+			local last = jt.keyframes[#jt.keyframes]
+			if last then
+				maxT = math.max(maxT, last.t)
+			end
 		end
 	end
 	if tr.segments then
@@ -933,6 +1215,18 @@ local function clampAllTracksToDuration(tracks: { CutsceneFormat.Track }, dur: n
 		if tr.effectCues then
 			for _, c in tr.effectCues do
 				c.t = math.clamp(c.t, 0, dur)
+			end
+		end
+		if tr.propKeyframes then
+			for _, k in tr.propKeyframes do
+				k.t = math.clamp(k.t, 0, dur)
+			end
+		end
+		if tr.jointTracks then
+			for _, jt in tr.jointTracks do
+				for _, k in jt.keyframes do
+					k.t = math.clamp(k.t, 0, dur)
+				end
 			end
 		end
 	end
@@ -1079,7 +1373,11 @@ function EditorState.moveClip(self: EditorState, clip: CutsceneFormat.AnimationC
 	self:commitTracks(false)
 end
 
-function EditorState.setClipEndAt(self: EditorState, clip: CutsceneFormat.AnimationClip, endAt: number)
+function EditorState.setClipEndAt(
+	self: EditorState,
+	clip: CutsceneFormat.AnimationClip,
+	endAt: number
+)
 	local dur = self.duration:get()
 	local fps = self.fps:get()
 	local minLen = minClipSec(fps)
@@ -1101,7 +1399,8 @@ function EditorState.syncClipLengthFromAsset(
 	track: CutsceneFormat.Track,
 	model: Model?
 )
-	local sourceLen = AnimationAsset.resolveSourceLength(clip.animationId, { clip = clip, model = model })
+	local sourceLen =
+		AnimationAsset.resolveSourceLength(clip.animationId, { clip = clip, model = model })
 	if not sourceLen or sourceLen <= 0 then
 		warn(`[anima] 无法读取动画时长:{clip.animationId}`)
 		return
@@ -1147,6 +1446,18 @@ local function sortEvents(track: CutsceneFormat.Track)
 end
 
 -- 在 event 轨道当前时间加一个事件。
+-- 整表替换事件 payload(nil = 清除)。不原地改,配合撤销快照。19 spec。
+function EditorState.setEventPayload(
+	self: EditorState,
+	_track: CutsceneFormat.Track,
+	ev: CutsceneFormat.CutsceneEvent,
+	payload: { [string]: any }?
+)
+	self:pushUndo()
+	ev.payload = payload
+	self:commitTracks(true)
+end
+
 function EditorState.addEvent(
 	self: EditorState,
 	track: CutsceneFormat.Track,
@@ -1349,6 +1660,7 @@ end
 function EditorState.finishDrag(self: EditorState)
 	for _, tr in self.tracks:get() do
 		sortKeyframes(tr)
+		sortPropKeyframes(tr)
 		sortClips(tr)
 		sortEvents(tr)
 		sortSoundCues(tr)
@@ -1372,15 +1684,13 @@ end
 
 -- 整表替换(导入 / 新建 / 恢复草稿);清空撤销栈并重建预览。
 function EditorState.loadCutscene(self: EditorState, cutscene: CutsceneFormat.Cutscene)
+	-- 整体替换也压一步撤销:误点「新建/导入/打开」可 Ctrl+Z 找回原内容。
+	self:pushUndo()
 	self.name:set(cutscene.name)
 	self.duration:set(cutscene.duration)
 	self.fps:set(cutscene.fps or 30)
 	self.tracks:set(cloneTracks(cutscene.tracks))
 	self.selectedTrack:set(nil)
-	table.clear(self._undo)
-	table.clear(self._redo)
-	self.canUndo:set(false)
-	self.canRedo:set(false)
 	self:setTime(0)
 	self.revision:set(self.revision:get() + 1)
 end

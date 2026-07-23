@@ -33,47 +33,59 @@ function CameraDirector.poseForCameraTrack(
 	return VCamPose.at(cutscene, tr.target, t)
 end
 
--- 返回 (相机 CFrame, 上镜相机名)。找不到返回 (nil, nil)。
+-- 单条 camera 轨在 t 的 FOV(有 fovKeyframes 才返回;否则 nil,消费端回退 vcam attribute)。
+function CameraDirector.fovForCameraTrack(tr: CutsceneFormat.Track, t: number): number?
+	if tr.fovKeyframes and #tr.fovKeyframes > 0 then
+		return Sampler.sampleNumber(tr.fovKeyframes, t)
+	end
+	return nil
+end
+
+-- 返回 (相机 CFrame, 上镜相机名, FOV?)。找不到返回 (nil, nil, nil)。
+-- FOV 仅当上镜轨带 fovKeyframes 时返回,否则 nil(消费端用 vcam 的 FOV attribute)。
 function CameraDirector.evaluate(
 	cutscene: CutsceneFormat.Cutscene,
 	t: number,
 	resolveBinding: CutsceneFormat.BindingResolver?
-): (CFrame?, string?)
+): (CFrame?, string?, number?)
 	-- 1) 覆盖 t 的独立相机轨(落在任一生效段内),层级最高(索引最小)那条
 	local best: CutsceneFormat.Track? = nil
 	local bestIdx: number? = nil
 	for i, tr in cutscene.tracks do
-		if tr.kind == "camera" and CutsceneFormat.coversAt(tr, t) then
+		if tr.kind == "camera" and not tr.hidden and CutsceneFormat.coversAt(tr, t) then
 			if not bestIdx or i < bestIdx then
 				best, bestIdx = tr, i
 			end
 		end
 	end
 	if best then
+		local fov = CameraDirector.fovForCameraTrack(best, t)
 		local cf = CameraDirector.poseForCameraTrack(cutscene, best, t, resolveBinding)
 		if cf then
-			return cf, best.target
+			return cf, best.target, fov
 		end
-		return VCamPose.at(cutscene, best.target, t), best.target
+		return VCamPose.at(cutscene, best.target, t), best.target, fov
 	end
 
 	-- 2) 回退:无生效段的老 camera keyframes(早期直接录 CFrame 的相机轨,如 boss_intro)
 	for _, tr in cutscene.tracks do
 		if
 			tr.kind == "camera"
+			and not tr.hidden
 			and #CutsceneFormat.segmentsOf(tr) == 0
 			and tr.keyframes
 			and #tr.keyframes > 0
 		then
+			local fov = CameraDirector.fovForCameraTrack(tr, t)
 			local stored = Sampler.sampleCFrame(tr.keyframes, t)
 			if stored and resolveBinding then
-				return FollowAnchor.worldFromKeyframeCFrame(tr, stored, resolveBinding), nil
+				return FollowAnchor.worldFromKeyframeCFrame(tr, stored, resolveBinding), nil, fov
 			end
-			return stored, nil
+			return stored, nil, fov
 		end
 	end
 
-	return nil, nil
+	return nil, nil, nil
 end
 
 return CameraDirector

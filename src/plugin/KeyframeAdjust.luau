@@ -104,9 +104,9 @@ function KeyframeAdjust.start(
 		local cf = c.CFrame
 		if moved(self._lastCF, cf) then
 			self._lastCF = cf
-			local track = self._track
-			if track and track.kind == "camera" then
-				kf.value = FollowAnchor.storeKeyframeCFrame(track, cf, SceneResolver.resolve)
+			local tr = self._track
+			if tr and tr.kind == "camera" then
+				kf.value = FollowAnchor.storeKeyframeCFrame(tr, cf, SceneResolver.resolve)
 			else
 				kf.value = cf
 			end

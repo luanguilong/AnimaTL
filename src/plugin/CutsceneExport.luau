@@ -222,6 +222,13 @@ local function sliceTrack(
 		out.keyframes = sliceKeyframesPlain(track.keyframes, fromSec, toSec)
 	end
 
+	out.fovKeyframes = sliceTimedList(track.fovKeyframes, fromSec, toSec, function(kf)
+		return kf.t
+	end, function(kf, t)
+		kf.t = t
+		return kf
+	end)
+
 	out.clips = sliceClips(track.clips, fromSec, toSec, warnings)
 
 	out.events = sliceTimedList(track.events, fromSec, toSec, function(ev)
@@ -244,6 +251,29 @@ local function sliceTrack(
 		c.t = t
 		return c
 	end)
+
+	out.propKeyframes = sliceTimedList(track.propKeyframes, fromSec, toSec, function(kf)
+		return kf.t
+	end, function(kf, t)
+		kf.t = t
+		return kf
+	end)
+
+	if track.jointTracks then
+		local jts: { CutsceneFormat.JointTrack } = {}
+		for _, jt in track.jointTracks do
+			local kfs = sliceTimedList(jt.keyframes, fromSec, toSec, function(kf)
+				return kf.t
+			end, function(kf, t)
+				kf.t = t
+				return kf
+			end)
+			if kfs and #kfs > 0 then
+				table.insert(jts, { path = jt.path, keyframes = kfs })
+			end
+		end
+		out.jointTracks = jts
+	end
 
 	return out
 end
@@ -391,12 +421,6 @@ function CutsceneExport.writeModule(
 	data.name = name
 	mod.Source = Serializer.serialize(data)
 
-	local pathParts = { "ReplicatedStorage", ROOT_FOLDER, CUTSCENES_FOLDER }
-	for _, seg in segments do
-		table.insert(pathParts, seg)
-	end
-	table.insert(pathParts, name)
-	local instancePath = table.concat(pathParts, ".")
 	local requirePath = ROOT_FOLDER .. "." .. CUTSCENES_FOLDER
 	for _, seg in segments do
 		requirePath ..= "." .. seg

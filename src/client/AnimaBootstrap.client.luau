@@ -56,8 +56,28 @@ do
 	end
 end
 
+local function vfxMountPart(character: Model): BasePart?
+	local mount = character:FindFirstChild("Torso")
+		or character:FindFirstChild("UpperTorso")
+		or character:FindFirstChild("HumanoidRootPart")
+	if mount and mount:IsA("BasePart") then
+		return mount
+	end
+	return nil
+end
+
+-- 特效包零件多为 Anchored,克隆/换父级不会跟随角色,必须显式 PivotTo 到挂点。
+local function alignVfxPack(character: Model)
+	local pack = character:FindFirstChild(VFX_PACK_NAME, true)
+	local mount = vfxMountPart(character)
+	if pack and pack:IsA("Model") and mount then
+		pack:PivotTo(mount.CFrame)
+	end
+end
+
 local function attachVfxPackToCharacter(character: Model)
 	if character:FindFirstChild(VFX_PACK_NAME, true) then
+		alignVfxPack(character)
 		return
 	end
 	local template = findVfxTemplate()
@@ -66,14 +86,9 @@ local function attachVfxPackToCharacter(character: Model)
 		return
 	end
 	local clone = template:Clone()
-	local mount = character:FindFirstChild("Torso")
-		or character:FindFirstChild("UpperTorso")
-		or character:FindFirstChild("HumanoidRootPart")
-	if mount then
-		clone.Parent = mount
-	else
-		clone.Parent = character
-	end
+	local mount = vfxMountPart(character)
+	clone.Parent = mount or character
+	alignVfxPack(character)
 end
 
 local function bindingResolver(name: string): Instance?
@@ -101,7 +116,9 @@ local function loadCutsceneModule(): ModuleScript?
 	if mod and mod:IsA("ModuleScript") then
 		return mod
 	end
-	warn(`[anima] 缺少 Cutscenes.{CUTSCENE_MODULE_NAME} — 请在 Timeline 💾 导出模块名 {CUTSCENE_MODULE_NAME}`)
+	warn(
+		`[anima] 缺少 Cutscenes.{CUTSCENE_MODULE_NAME} — 请在 Timeline 💾 导出模块名 {CUTSCENE_MODULE_NAME}`
+	)
 	return nil
 end
 
@@ -151,21 +168,20 @@ if localPlayer.Character then
 end
 localPlayer.CharacterAdded:Connect(onCharacterAdded)
 
-ContextActionService:BindAction(
-	PLAY_ACTION,
-	function(_name, inputState)
-		if inputState == Enum.UserInputState.Begin then
-			playPlayerLvTi()
-		end
-		return Enum.ContextActionResult.Pass
-	end,
-	false,
-	PLAY_KEY
-)
+ContextActionService:BindAction(PLAY_ACTION, function(_name, inputState)
+	if inputState == Enum.UserInputState.Begin then
+		playPlayerLvTi()
+	end
+	return Enum.ContextActionResult.Pass
+end, false, PLAY_KEY)
 
 -- selene: allow(global_usage)
 _G.AnimaPlayPlayerLvTi = playPlayerLvTi
+-- selene: allow(global_usage) -- 刻意暴露的调试入口
 _G.AnimaPlayRig1LvTi = playPlayerLvTi
+-- selene: allow(global_usage)
 _G.AnimaPlayBossIntro = playPlayerLvTi
 
-print(`[anima] 进游戏按 {PLAY_KEY.Name} 播放 {CUTSCENE_MODULE_NAME} · 或 _G.AnimaPlayPlayerLvTi()`)
+print(
+	`[anima] 进游戏按 {PLAY_KEY.Name} 播放 {CUTSCENE_MODULE_NAME} · 或 _G.AnimaPlayPlayerLvTi()`
+)

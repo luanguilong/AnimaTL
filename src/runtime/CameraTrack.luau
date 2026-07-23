@@ -16,6 +16,7 @@ export type CameraTrack = typeof(setmetatable(
 		camera: Camera,
 		_resolveBinding: CutsceneFormat.BindingResolver?,
 		_prevType: Enum.CameraType?,
+		_prevFov: number?,
 	},
 	CameraTrack
 ))
@@ -33,17 +34,21 @@ function CameraTrack.new(
 	}, CameraTrack)
 end
 
--- 接管相机:切到 Scriptable,记住原类型以便还原。
+-- 接管相机:切到 Scriptable,记住原类型/FOV 以便还原。
 function CameraTrack.begin(self: CameraTrack)
 	self._prevType = self.camera.CameraType
+	self._prevFov = self.camera.FieldOfView
 	self.camera.CameraType = Enum.CameraType.Scriptable
 end
 
--- 在时间 t 更新相机位姿(择一求值)。
+-- 在时间 t 更新相机位姿 + FOV(择一求值;fovKeyframes 采样值优先)。
 function CameraTrack.update(self: CameraTrack, t: number)
-	local cf = CameraDirector.evaluate(self.cutscene, t, self._resolveBinding)
+	local cf, _name, fov = CameraDirector.evaluate(self.cutscene, t, self._resolveBinding)
 	if cf then
 		self.camera.CFrame = cf
+	end
+	if fov then
+		self.camera.FieldOfView = fov
 	end
 end
 
@@ -53,6 +58,9 @@ function CameraTrack.finish(self: CameraTrack)
 		self.camera.CameraType = self._prevType
 	else
 		self.camera.CameraType = Enum.CameraType.Custom
+	end
+	if self._prevFov then
+		self.camera.FieldOfView = self._prevFov
 	end
 end
 

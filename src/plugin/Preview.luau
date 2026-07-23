@@ -10,6 +10,8 @@ local CutsceneFormat = require(script.Parent.Shared.CutsceneFormat)
 local SceneResolver = require(script.Parent.SceneResolver)
 local AnimationPreview = require(script.Parent.AnimationPreview)
 local MediaPreview = require(script.Parent.MediaPreview)
+local PropertyPreview = require(script.Parent.PropertyPreview)
+local RigAnimPreview = require(script.Parent.RigAnimPreview)
 
 local Preview = {}
 
@@ -38,6 +40,8 @@ end
 function Preview.clearAnimationCache()
 	AnimationPreview.clearCache(_animCache)
 	MediaPreview.reset()
+	PropertyPreview.restore()
+	RigAnimPreview.restore()
 	_lastPreviewT = 0
 	_lastPreviewWsFxT = 0
 end
@@ -56,9 +60,14 @@ function Preview.applyAt(cutscene: CutsceneFormat.Cutscene, t: number, includeCa
 			cutsceneRevision = Preview.cutsceneRevision,
 		})
 	end
+	PropertyPreview.apply(cutscene, t, resolve, "workspace")
+	RigAnimPreview.apply(cutscene, t, resolve)
 	_lastPreviewT = t
 	AnimationPreview.pruneCache(_animCache)
 	for _, track in cutscene.tracks do
+		if track.hidden then
+			continue
+		end
 		if (track.kind == "camera" and includeCamera) or track.kind == "transform" then
 			if track.keyframes and #track.keyframes > 0 then
 				local cf = Sampler.sampleCFrame(track.keyframes, t)
@@ -72,7 +81,7 @@ function Preview.applyAt(cutscene: CutsceneFormat.Cutscene, t: number, includeCa
 		end
 	end
 	for _, track in cutscene.tracks do
-		if track.kind == "animation" and track.clips then
+		if track.kind == "animation" and track.clips and not track.hidden then
 			local target = resolve(track.target)
 			if target and target:IsA("Model") and target:IsDescendantOf(workspace) then
 				if isCharacterModel(target) then

@@ -1,43 +1,56 @@
-# 03 — 后续增加功能 + 改善手感(规划)
+# 03 — 任务表(路线图,2026-07-23 重排)
 
-按优先级分组。P0=手感/闭环核心,P1=编辑完成度,P2=进阶/打磨。
+> 定位一句话:**Moon 是"动画创作工具",anima 是"过场演出系统"**。
+> 不和 Moon 拼做动画;把"排戏 + 在游戏里放戏"做到无可替代。
+> 本表按性价比排序;每个任务动工前先写独立 spec(编号 17+),spec 即开发 prompt。
+>
+> ✅ 旧 roadmap 已完成项(详见 01-done/04-features):跟随绑定(06)、时间轴缩放滚动、
+> 改时长 UI、改名、事件轨、Record、多过场浏览器、空格播放、Forge 特效轨(16)+
+> 编辑期近似预览(粒子/Beam/mesh/tweener/小窗粒子模拟)、Moon 相机导入(锚点:存档创作位姿优先)。
 
-> ✅ 已于 2026-07-16 完成(详见 01-done):**动画轨编辑 + 预览定帧**、**事件轨编辑**、**vcam 改名**、**内联文本输入(InputPrompt)**、**transform 打帧入口**、**对象分组折叠(Track.group)**、**空格/Enter 播放**、**相机运动子轨(cameraMove:单台 vcam 关键帧运动,顶层 shots 决定谁上镜)**、**Record 录制模式**、**每相机独立轨模型(生效区间+上层优先+直线/曲线插值+行内起止两帧录制)**。下面保留仍未做的部分。
+## 任务总表
 
-## P0 — 手感与近处闭环(优先)
+| # | 任务 | 一句话目标 | 类型 | 规格 | 状态 |
+|---|------|-----------|------|------|------|
+| T1 | **属性轨(kind=property)** | K 任意 Instance 属性(透明度/颜色/光照/FOV 外的数值),补对 Moon 最大功能缺口 | 补短板 | 17 | ✅ 2026-07-23(待 Studio 实测) |
+| T2 | **动画真实时长回填** | clip 块宽度从估计值(+1.5s)改为加载后读 `AnimationTrack.Length`,时间轴可信 | 补短板 | 18 | ✅ 2026-07-23(待 Studio 实测) |
+| T3 | **事件 payload 编辑 UI** | event 除名字外可编辑键值 payload,运行时 onEvent 拿到结构化数据 | 补短板 | 19 | ✅ 2026-07-23(顺手修了 Serializer 丢 payload 的导出 bug) |
+| T4 | **Moon rig 动画导入** | 把 Moon 存档的关节轨转进 anima(运行时直驱 Motor6D),"Moon 创作 → anima 演出"管线闭环 | 拉差距 | 20 | ✅ 2026-07-23(spike 验证数学+绑定;待 Studio 实测) |
+| T5 | **缓动扩展 + 逐 key 曲线** | 先补 Back/Expo/Elastic/Bounce 具名档,再谈逐 key 贝塞尔(graph editor 后置) | 补短板 | 21(待写) | ⬜ |
+| T6 | **运行时演出语汇** | 镜头 crossfade(现在只有硬切)、黑边/淡入淡出/跳过按钮内建、服务器触发全员播放 | 拉差距 | 22(待写) | ⬜ |
+| T7 | **垂直滚动 + 关键帧复制粘贴** | 轨道多不裁剪(左名列同步);单 key Ctrl+C/V、跨轨同刻粘贴(多选/框选仍不做) | 手感 | 23(待写) | ⬜ |
+| T8 | **运行时尊重分组 + 校验** | group 进运行时语义(整组静音/隐藏);导出前校验悬空 vcam/空轨/越界 key | 工程 | 24(待写) | ⬜ |
+| T9 | **打磨杂项批** | vcam 真视锥 wireframe、CameraPath 独立显隐、预览黑边按输出宽高比自适应 | 打磨 | 无需 spec | ⬜ |
+| V1 | **task#4 装扮跟随最终验证** | 真实 R6 动画 id + Door/Boss 场景,Play 模式跑 boss_intro 确认 | 验证 | — | ⬜(阻塞:要真动画 id) |
+| V2 | **积压实测批** | 一次性过清单:右键菜单全家桶(🟡 批)、Forge 近似预览(主视口+小窗)、空格播放、Moon 导入锚点(存档带根帧的正例) | 验证 | — | ⬜(需用户配合,MCP 截不到 GUI) |
+| W1 | **git 提交与远端对齐** | 本地两周改动全未 commit(含 4 个新文件);按批拆 commit 推 origin,以后小批勤提 | 工程 | — | ⬜(push 认证在用户侧) |
 
-- **相机轨跟随绑定**（Player/HRP 相对 key、统一求值）：规格见 [06 — 相机轨跟随绑定](06-camera-follow-binding-spec.md)。实现顺序 M1 契约 → M2 `CameraDirector` → M3 面板芯片 → M4 录制/预览闭环。
-- **时间轴缩放 + 横向滚动**(最影响手感):定位从 `t/duration`(Scale)改为 `pixelsPerSecond + 滚动偏移`(ScrollingFrame / 视口变换)。带来:长过场可展开、拖拽更精细、滚轮缩放、拖动画布平移。App 坐标系较大重构,但值得。
-- **补齐半成品入口**:
-  - vcam / 轨道 **改名**:右键→内联 TextBox 覆盖编辑,回车提交(复用一个 `promptText` helper)。
-  - **改时长** UI:工具条放可编辑时间数字(TextBox)或 +/- 档,调 `EditorState.setDuration`。
-- **多选 + 框选关键帧**:框选一组,整体拖移/删除/缓动。
-- **复制/粘贴关键帧**(Ctrl+C/V),跨轨道同刻粘贴。
-- **键盘帧步进**:`,` / `.` 上一/下一关键帧或镜头边界;空格播放/暂停;Home 回起点。
+## 任务级补充说明
 
-## P1 — 编辑完成度
+- **T1 顺手加契约版本号**:Cutscene 加 `formatVersion`(当前数据视为 1,property 轨落地时升 2)。
+  现在加成本≈0;等 T5 逐 key 曲线、T4 导入再加就要背迁移债。EditorState 已有 cloneTrack
+  迁移先例(segments),照抄该模式。
+- **T4 先做 spike 再排期**:关节轨转换有三个未知数——Moon 存关节值是相对 default 的
+  复合(Moonlite:`c1:Inverse() * default`)、rig 关节命名/层级对齐(R6/R15/自定义)、逐 key
+  缓动映射。先做"单关节→Motor6D 直驱"PoC 验证数学,再写完整 spec,避免整批返工。
+- **T6 需要网络设计章节**:全员触发涉及 RemoteEvent 权威、迟到玩家(中途加入怎么办:
+  跳过/快进/不播)、StreamingEnabled 下绑定解析失败的降级。spec 22 必须含这节。
+- **性能观察项(不立项,记着)**:App 的 Computed 依赖 tracks 整体重建,轨道/关键帧多时
+  commitTracks 会卡;T7 垂直滚动动手时顺带测 30 轨 × 200 key 的重建耗时,超 50ms 再谈虚拟化。
+- **文档/教程刻意不立项**:当前单人使用,写教程性价比为零;等有第二个用户再说。
 
-- **动画轨道编辑**:
-  - 选 AnimationId(输入 rbxassetid 或从场景/资源选)。
-  - 时间轴上摆 clip(拖移 startAt、拖右边缘改时长、设 speed/looped/fadeTime)。
-  - **预览窗口里真的播动画**:PreviewViewport 克隆角色上 LoadAnimation + 按 playhead `AdjustSpeed(0)` + `TimePosition` 定帧(scrub 时定格到对应帧)。
-- **Record 录制模式**:进入录制后,挪场景物体/相机 → 到当前 playhead 自动打关键帧(相机可自动新建 vcam + shot)。类 Sequencer 录制,极大提速摆帧。
-- **多过场浏览器**:侧栏列 `cutscenes/*`,新建 / 打开 / 另存;导入回读闭环(从 ModuleScript 载回面板)。
-- **事件轨编辑**:在时间轴打 event 点,填 name + payload(音效/粒子/切镜等具名信号)。
+## 建议动工顺序
 
-## P2 — 进阶与打磨
+1. **T1 属性轨** — 性价比最高:数据契约加一种 kind,运行时加 PropertyTrack,编辑器复用关键帧行;与 Forge tweener 预览、Sampler 插值天然复用。
+2. **T2 + T3** — 小而痛,一批做完(都是"时间轴可信度"问题)。
+3. **T4 Moon rig 导入** — 对 Moon 用户杀伤力最大,但工作量大(关节轨→Motor6D 映射、rig 结构对齐),放在 T1 练完属性轨插值之后。
+4. **T5/T6/T7** 按当时痛点挑;T8/T9 见缝插针。
 
-- **曲线编辑器**(Graph Editor):对 transform/camera 关键帧看/编 easing 曲线,拖控制点(超越现有具名 easing 档)。
-- **vcam 视锥 gizmo**:真视锥 wireframe(按 FOV/宽高比),LookAt 连线,选中时高亮。
-- **CameraPath 增强**:轨迹独立显隐开关;按 shot 分段上色;blend 区间虚线;悬停显示 t/vcam。
-- **预览保真**:黑边按真实输出宽高比自适应;可选安全框(action/title safe);跟随主视口时也叠加构图网格。
-- **过场校验**:检测悬空 vcam 引用、空轨道、超出时长的关键帧,面板给告警。
-- **DataModel 撤销整合**:vcam Part 的移动走 ChangeHistoryService,与自建数据撤销栈协调(避免两套撤销割裂)。
+## 手感原则(贯穿各批,不变)
 
-## 手感原则(贯穿各批)
-
-- **拖拽即所见**:任何拖拽(时间/blend/物体)预览与 3D 轨迹实时跟随,不等松手。
-- **吸附但可关**:默认吸附整数秒/相邻标记,Alt 临时关闭;缩放后吸附阈值按像素换算保持一致手感。
-- **一步一撤销**:整段拖拽算一步;离散操作各自一步;快捷键就近(面板内 Ctrl+Z/Y)。
+- **拖拽即所见**:任何拖拽预览与 3D 轨迹实时跟随,不等松手。
+- **吸附但可关**:默认吸附整秒/相邻标记,Alt 临时关闭;缩放后阈值按像素换算。
+- **一步一撤销**:整段拖拽算一步;快捷键面板内生效,不与 Studio 打架。
 - **零 Explorer 手改**:vcam/轨道/目标全在面板内可视化管理。
-- **不污染工程**:辅助实体(vcam gizmo / CameraPath)Locked / CanQuery=false / Archivable=false,不进导出、不挡选取。
+- **不污染工程**:辅助实体 Locked / CanQuery=false / Archivable=false,不进导出。
+- **许可红线**:任何 Forge/Moon 相关功能只读数据约定,不加载/搬运对方代码(VFX-DL 禁插件加载;Moon 格式解析参考 Moonlite 但独立实现)。

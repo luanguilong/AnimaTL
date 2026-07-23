@@ -7,7 +7,6 @@
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 
-local Theme = require(script.Parent.Theme)
 local OverlayHost = require(script.Parent.OverlayHost)
 
 local DragController = {}

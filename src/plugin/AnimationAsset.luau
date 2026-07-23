@@ -95,7 +95,14 @@ function AnimationAsset.resolveSourceLength(animationId: string, opts: ResolveOp
 	if not ok or not track then
 		return nil
 	end
+	-- Length 在 KeyframeSequence 未下载完成时为 0:有界等待(18 spec)
 	local len = track.Length
+	local waited = 0
+	while len <= 0 and waited < 3 do
+		task.wait(0.1)
+		waited += 0.1
+		len = track.Length
+	end
 	pcall(function()
 		track:Stop(0)
 	end)
@@ -104,6 +111,54 @@ function AnimationAsset.resolveSourceLength(animationId: string, opts: ResolveOp
 	end
 	lengthCache[key] = len
 	return len
+end
+
+-- 只查缓存,不触发解析(UI 每帧调用安全)。
+function AnimationAsset.cachedLength(
+	animationId: string,
+	clip: CutsceneFormat.AnimationClip?
+): number?
+	if animationId == "" or animationId == "rbxassetid://0" then
+		return nil
+	end
+	local animId = AnimationPreview.normalizeAnimId(animationId)
+	local preferRig = rigTypeFromClip(clip)
+	local rigName = if preferRig then preferRig.Name else "Any"
+	return lengthCache[cacheKey(animId, rigName)]
+end
+
+local _prefetching = false
+
+-- 后台解析过场里所有 clip 的源时长(缓存命中/无效 id 跳过)。
+-- 有任何新解析成功时调用一次 onResolved(调用方借此重绘时间轴宽度)。
+function AnimationAsset.prefetchCutscene(
+	cutscene: CutsceneFormat.Cutscene,
+	onResolved: (() -> ())?
+)
+	if _prefetching then
+		return
+	end
+	_prefetching = true
+	task.spawn(function()
+		local resolvedAny = false
+		for _, tr in cutscene.tracks do
+			if tr.kind ~= "animation" or not tr.clips then
+				continue
+			end
+			for _, clip in tr.clips do
+				if AnimationAsset.cachedLength(clip.animationId, clip) then
+					continue
+				end
+				if AnimationAsset.resolveSourceLength(clip.animationId, { clip = clip }) then
+					resolvedAny = true
+				end
+			end
+		end
+		_prefetching = false
+		if resolvedAny and onResolved then
+			onResolved()
+		end
+	end)
 end
 
 function AnimationAsset.clearCache()

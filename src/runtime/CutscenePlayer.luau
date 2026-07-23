@@ -20,6 +20,8 @@ local CutsceneFormat = require(script.Parent.Parent.Shared.CutsceneFormat)
 local CharacterBinder = require(script.Parent.CharacterBinder)
 local CameraTrack = require(script.Parent.CameraTrack)
 local TransformTrack = require(script.Parent.TransformTrack)
+local PropertyTrack = require(script.Parent.PropertyTrack)
+local RigAnimTrack = require(script.Parent.RigAnimTrack)
 local EventTrack = require(script.Parent.EventTrack)
 local SoundTrack = require(script.Parent.SoundTrack)
 local EffectTrack = require(script.Parent.EffectTrack)
@@ -51,6 +53,8 @@ export type CutscenePlayer = typeof(setmetatable(
 		onEvent: EventTrack.EventHandler,
 		_cameraTracks: { CameraTrack.CameraTrack },
 		_transformTracks: { TransformTrack.TransformTrack },
+		_propertyTracks: { PropertyTrack.PropertyTrack },
+		_rigAnimTracks: { RigAnimTrack.RigAnimTrack },
 		_eventTracks: { EventTrack.EventTrack },
 		_soundTracks: { SoundTrack.SoundTrack },
 		_effectTracks: { EffectTrack.EffectTrack },
@@ -77,6 +81,8 @@ function CutscenePlayer.new(cutscene: CutsceneFormat.Cutscene, config: Config): 
 		onEvent = config.onEvent or defaultEventHandler,
 		_cameraTracks = {},
 		_transformTracks = {},
+		_propertyTracks = {},
+		_rigAnimTracks = {},
 		_eventTracks = {},
 		_soundTracks = {},
 		_effectTracks = {},
@@ -103,6 +109,9 @@ function CutscenePlayer.new(cutscene: CutsceneFormat.Cutscene, config: Config): 
 	-- 从数据构建各轨道运行时对象。相机走 CameraDirector 择一,整场只建一个 CameraTrack。
 	local cameraBuilt = false
 	for _, track in cutscene.tracks do
+		if track.hidden then
+			continue
+		end
 		if track.kind == "camera" then
 			if not cameraBuilt then
 				table.insert(self._cameraTracks, CameraTrack.new(cutscene, camera, config.resolver))
@@ -114,6 +123,26 @@ function CutscenePlayer.new(cutscene: CutsceneFormat.Cutscene, config: Config): 
 				table.insert(self._transformTracks, TransformTrack.new(track, target))
 			else
 				warn(`[anima] transform 轨道找不到目标 '{track.target}'`)
+			end
+		elseif track.kind == "property" then
+			local target = config.resolver(track.target)
+			if target then
+				local pt = PropertyTrack.new(track, target)
+				if pt then
+					table.insert(self._propertyTracks, pt)
+				end
+			else
+				warn(`[anima] property 轨道找不到目标 '{track.target}'`)
+			end
+		elseif track.kind == "rigAnim" then
+			local target = config.resolver(track.target)
+			if target then
+				local rt = RigAnimTrack.new(track, target)
+				if rt then
+					table.insert(self._rigAnimTracks, rt)
+				end
+			else
+				warn(`[anima] rigAnim 轨道找不到目标 '{track.target}'`)
 			end
 		elseif track.kind == "event" then
 			local target = config.resolver(track.target)
@@ -160,6 +189,12 @@ function CutscenePlayer._step(self: CutscenePlayer, t: number)
 	end
 	for _, tt in self._transformTracks do
 		tt:update(t)
+	end
+	for _, pt in self._propertyTracks do
+		pt:update(t)
+	end
+	for _, rt in self._rigAnimTracks do
+		rt:update(t)
 	end
 	for _, et in self._eventTracks do
 		et:update(t)
@@ -237,6 +272,12 @@ function CutscenePlayer.stop(self: CutscenePlayer)
 	end
 	for _, ft in self._effectTracks do
 		ft:stop()
+	end
+	for _, pt in self._propertyTracks do
+		pt:stop()
+	end
+	for _, rt in self._rigAnimTracks do
+		rt:stop()
 	end
 end
 

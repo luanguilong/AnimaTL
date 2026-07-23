@@ -56,7 +56,11 @@ local function sampleInterval(
 	return av:Lerp(bv, eased)
 end
 
-local function sampleAtTime(keyframes: { CutsceneFormat.Keyframe }, t: number, track: CutsceneFormat.Track?): CFrame?
+local function sampleAtTime(
+	keyframes: { CutsceneFormat.Keyframe },
+	t: number,
+	track: CutsceneFormat.Track?
+): CFrame?
 	local n = #keyframes
 	if n == 0 then
 		return nil
@@ -90,6 +94,80 @@ function Sampler.sampleCFrame(
 		tr = { kind = "transform", target = "", smooth = smooth }
 	end
 	return sampleAtTime(keyframes, t, tr)
+end
+
+-- 在数值关键帧(如 FOV)上采样:端点 clamp,段内 lerp + 目标帧 easing。
+function Sampler.sampleNumber(keyframes: { CutsceneFormat.FovKeyframe }, t: number): number?
+	local n = #keyframes
+	if n == 0 then
+		return nil
+	end
+	if t <= keyframes[1].t then
+		return keyframes[1].value
+	end
+	if t >= keyframes[n].t then
+		return keyframes[n].value
+	end
+	for i = 1, n - 1 do
+		local a = keyframes[i]
+		local b = keyframes[i + 1]
+		if t >= a.t and t <= b.t then
+			local span = b.t - a.t
+			local alpha = if span > 0 then (t - a.t) / span else 1
+			local eased = Easing.apply(b.easing, alpha)
+			return a.value + (b.value - a.value) * eased
+		end
+	end
+	return keyframes[n].value
+end
+
+local function lerpPropValue(
+	a: CutsceneFormat.PropValue,
+	b: CutsceneFormat.PropValue,
+	alpha: number
+): CutsceneFormat.PropValue
+	if typeof(a) ~= typeof(b) then
+		return a
+	end
+	if typeof(a) == "number" then
+		return (a :: number) + ((b :: number) - (a :: number)) * alpha
+	end
+	if typeof(a) == "Vector3" then
+		return (a :: Vector3):Lerp(b :: Vector3, alpha)
+	end
+	if typeof(a) == "Color3" then
+		return (a :: Color3):Lerp(b :: Color3, alpha)
+	end
+	-- 阶梯(boolean 等):段内取左值,到达右 key 由端点分支返回右值
+	return a
+end
+
+-- 属性关键帧采样(17 spec):端点 clamp;段内按右 key easing 插值;
+-- 不可插值类型阶梯(到 key 才切换)。
+function Sampler.sampleValue(
+	keyframes: { CutsceneFormat.PropKeyframe },
+	t: number
+): CutsceneFormat.PropValue?
+	local n = #keyframes
+	if n == 0 then
+		return nil
+	end
+	if t <= keyframes[1].t then
+		return keyframes[1].value
+	end
+	if t >= keyframes[n].t then
+		return keyframes[n].value
+	end
+	for i = 1, n - 1 do
+		local a = keyframes[i]
+		local b = keyframes[i + 1]
+		if t >= a.t and t <= b.t then
+			local span = b.t - a.t
+			local alpha = if span > 0 then (t - a.t) / span else 1
+			return lerpPropValue(a.value, b.value, Easing.apply(b.easing, alpha))
+		end
+	end
+	return keyframes[n].value
 end
 
 -- 带轨级 pathMode / smooth 的采样(camera / cameraMove)。

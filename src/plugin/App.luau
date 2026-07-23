@@ -12,7 +12,6 @@
 -- 数据编辑直接调 EditorState(含撤销栈);vcam / 相机等 DataModel 副作用走回调。
 
 local UserInputService = game:GetService("UserInputService")
-local RunService = game:GetService("RunService")
 local Selection = game:GetService("Selection")
 
 local Fusion = require(script.Parent.Packages.Fusion)
@@ -24,6 +23,7 @@ local InputPrompt = require(script.Parent.InputPrompt)
 local CutsceneFormat = require(script.Parent.Shared.CutsceneFormat)
 local VCam = require(script.Parent.Shared.VCam)
 local TimelineUnity = require(script.Parent.TimelineUnity)
+local AnimationAsset = require(script.Parent.AnimationAsset)
 local OverlayHost = require(script.Parent.OverlayHost)
 local BindingDrop = require(script.Parent.BindingDrop)
 local BindingFromInstance = require(script.Parent.BindingFromInstance)
@@ -162,6 +162,7 @@ end
 
 type SnapSkip = {
 	keyframe: CutsceneFormat.Keyframe?,
+	propKeyframe: CutsceneFormat.PropKeyframe?,
 	clip: CutsceneFormat.AnimationClip?,
 	event: CutsceneFormat.CutsceneEvent?,
 	segment: CutsceneFormat.CameraSegment?,
@@ -177,6 +178,13 @@ local function markTimesForTrack(track: CutsceneFormat.Track, skip: SnapSkip?): 
 	if track.keyframes then
 		for _, kf in track.keyframes do
 			if not (skip and skip.keyframe == kf) then
+				table.insert(out, kf.t)
+			end
+		end
+	end
+	if track.propKeyframes then
+		for _, kf in track.propKeyframes do
+			if not (skip and skip.propKeyframe == kf) then
 				table.insert(out, kf.t)
 			end
 		end
@@ -468,6 +476,112 @@ local function cameraPathMenuItems(
 	return items
 end
 
+-- 事件 payload ↔ 文本:`k=v; k2=v2`,值自动转型(number/true/false/string)。19 spec。
+local function payloadToText(payload: { [string]: any }): string
+	local keys = {}
+	for k in payload do
+		table.insert(keys, k)
+	end
+	table.sort(keys)
+	local parts = {}
+	for _, k in keys do
+		table.insert(parts, k .. "=" .. tostring(payload[k]))
+	end
+	return table.concat(parts, "; ")
+end
+
+-- 解析失败返回 (nil, 错误);空输入返回 (nil, nil) = 清除 payload。
+local function payloadFromText(txt: string): ({ [string]: any }?, string?)
+	local trimmed = (txt:gsub("^%s+", ""):gsub("%s+$", ""))
+	if trimmed == "" then
+		return nil, nil
+	end
+	local out: { [string]: any } = {}
+	local n = 0
+	for pair in trimmed:gmatch("[^;]+") do
+		local body = (pair:gsub("^%s+", ""):gsub("%s+$", ""))
+		if body == "" then
+			continue
+		end
+		local k, v = body:match("^([%w_]+)%s*=%s*(.*)$")
+		if not k or not v or v == "" then
+			return nil, `无法解析 '{body}'(应为 k=v)`
+		end
+		local num = tonumber(v)
+		if num then
+			out[k] = num
+		elseif v == "true" then
+			out[k] = true
+		elseif v == "false" then
+			out[k] = false
+		else
+			out[k] = v
+		end
+		n += 1
+	end
+	if n == 0 then
+		return nil, nil
+	end
+	return out, nil
+end
+
+-- 属性值 ↔ 文本(属性轨改值输入用)
+local function propValueToText(v: CutsceneFormat.PropValue): string
+	local tn = typeof(v)
+	if tn == "number" then
+		return string.format("%.4g", v :: number)
+	elseif tn == "boolean" then
+		return tostring(v)
+	elseif tn == "Vector3" then
+		local vec = v :: Vector3
+		return string.format("%.4g, %.4g, %.4g", vec.X, vec.Y, vec.Z)
+	elseif tn == "Color3" then
+		local c = v :: Color3
+		return string.format(
+			"%d, %d, %d",
+			math.round(c.R * 255),
+			math.round(c.G * 255),
+			math.round(c.B * 255)
+		)
+	end
+	return tostring(v)
+end
+
+-- 按样本值的类型解析输入文本;失败返回 nil。Color3 用 0–255 RGB。
+local function propValueFromText(
+	txt: string,
+	sample: CutsceneFormat.PropValue
+): CutsceneFormat.PropValue?
+	local tn = typeof(sample)
+	local trimmed = (txt:gsub("^%s+", ""):gsub("%s+$", ""))
+	if tn == "number" then
+		return tonumber(trimmed)
+	elseif tn == "boolean" then
+		if trimmed == "true" or trimmed == "1" then
+			return true
+		end
+		if trimmed == "false" or trimmed == "0" then
+			return false
+		end
+		return nil
+	elseif tn == "Vector3" or tn == "Color3" then
+		local a, b, c = trimmed:match("^([%-%.%d]+)[,%s]+([%-%.%d]+)[,%s]+([%-%.%d]+)$")
+		local x, y, z = tonumber(a), tonumber(b), tonumber(c)
+		if not (x and y and z) then
+			return nil
+		end
+		if tn == "Vector3" then
+			return Vector3.new(x, y, z)
+		end
+		return Color3.fromRGB(
+			math.clamp(x, 0, 255),
+			math.clamp(y, 0, 255),
+			math.clamp(z, 0, 255)
+		)
+	end
+	return nil
+end
+
 -- 轨道右键菜单(左栏行 / 时间轴行共用):按类型的快捷操作 + 改名 / 换目标 / 删除。
 -- atTime:时间轴行右键时传入点击处对应的时间,创建项在该时间点生效;
 -- 不传(左栏行)则沿用当前播放头时间。
@@ -579,6 +693,60 @@ local function showTrackMenu(
 				cb.onCaptureTransform(track, atTime)
 			end,
 		})
+	elseif track.kind == "property" then
+		table.insert(items, {
+			text = (if atTime then "在此处打帧(读当前值)" else "在此刻打帧(读当前值)") .. suffix,
+			onClick = function()
+				local err = state:capturePropFrame(track, nil, atTime)
+				if err then
+					warn("[anima] 属性打帧失败:" .. err)
+				end
+			end,
+		})
+		table.insert(items, {
+			text = "输值打帧…" .. suffix,
+			onClick = function()
+				local kfs = track.propKeyframes
+				local sample: CutsceneFormat.PropValue? = if kfs and kfs[#kfs]
+					then kfs[#kfs].value
+					else nil
+				if sample == nil then
+					local read = EditorState.readPropertyValue(track.target, track.propertyName or "")
+					sample = read
+				end
+				if sample == nil then
+					warn(`[anima] 属性轨 '{track.target}.{track.propertyName or "?"}' 读不到样本值`)
+					return
+				end
+				InputPrompt.show(gui, {
+					title = string.format(
+						"%s 的值(%s)",
+						track.propertyName or "?",
+						typeof(sample)
+					),
+					default = propValueToText(sample :: CutsceneFormat.PropValue),
+					onSubmit = function(txt)
+						local v = propValueFromText(txt, sample :: CutsceneFormat.PropValue)
+						if v ~= nil then
+							local err = state:capturePropFrame(track, v, atTime)
+							if err then
+								warn("[anima] 属性打帧失败:" .. err)
+							end
+						else
+							warn(`[anima] 属性值解析失败:'{txt}'({typeof(sample)})`)
+						end
+					end,
+				})
+			end,
+		})
+		table.insert(items, {
+			text = if track.keepOnDone
+				then "✓ 播完保留终值(点击改为还原)"
+				else "播完保留终值(当前:还原原值)",
+			onClick = function()
+				state:setTrackKeepOnDone(track, not track.keepOnDone)
+			end,
+		})
 	elseif track.kind == "cameraMove" then
 		table.insert(items, {
 			text = "采集相机位姿打帧" .. suffix,
@@ -601,6 +769,25 @@ local function showTrackMenu(
 			end,
 		})
 	end
+	table.insert(items, { kind = "sep" })
+	table.insert(items, {
+		text = if track.hidden then "👁 显示轨道" else "🙈 隐藏轨道(预览/播放跳过)",
+		onClick = function()
+			state:setTrackHidden(track, not track.hidden)
+		end,
+	})
+	table.insert(items, {
+		text = "⬆ 上移一层" .. (if track.kind == "camera" then "(相机优先级↑)" else ""),
+		onClick = function()
+			state:moveTrack(track, -1)
+		end,
+	})
+	table.insert(items, {
+		text = "⬇ 下移一层",
+		onClick = function()
+			state:moveTrack(track, 1)
+		end,
+	})
 	table.insert(items, {
 		text = "改名…",
 		onClick = function()
@@ -687,6 +874,28 @@ local function showAddTrackMenu(
 		onClick = function()
 			pickTarget(gui, "绑定特效挂点", cb.targetCandidates(), function(tgt)
 				state:addTrack("effect", tgt, TimelineUnity.defaultTrackName("effect"))
+			end)
+		end,
+	})
+	table.insert(items, {
+		text = "属性轨道 → 选择绑定…",
+		onClick = function()
+			pickTarget(gui, "绑定目标", cb.targetCandidates(), function(tgt)
+				InputPrompt.show(gui, {
+					title = string.format("'%s' 的属性名", tgt),
+					placeholder = "如 Transparency / Color / Brightness",
+					onSubmit = function(prop)
+						if prop == "" then
+							return
+						end
+						local idx, err = state:addPropertyTrack(tgt, prop)
+						if err then
+							warn("[anima] 属性轨创建失败:" .. err)
+						elseif idx then
+							state.selectedTrack:set(idx)
+						end
+					end,
+				})
 			end)
 		end,
 	})
@@ -1205,6 +1414,133 @@ local function markDiamond(
 	return diamond
 end
 
+-- 属性关键帧菱形:长按拖时间、右键 定位/改时间/改值/缓动/删除(17 spec)。
+local function propDiamond(
+	gui: PluginGui,
+	state: EditorState.EditorState,
+	area: () -> GuiObject,
+	track: CutsceneFormat.Track,
+	kf: CutsceneFormat.PropKeyframe
+): Instance
+	local dur = state.duration:get()
+	local sz = Theme.size.keyframe
+	local diamond
+	diamond = e("TextButton")({
+		BackgroundColor3 = Theme.trackColor("property"),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(kf.t / dur, 0.5),
+		Size = UDim2.fromOffset(sz, sz),
+		Rotation = 45,
+		Text = "",
+		AutoButtonColor = true,
+		ZIndex = 6,
+		[OnEvent("InputBegan")] = function(input: InputObject)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				local grab = DragController.fracInArea(area(), gui:GetRelativeMousePosition(), gui)
+						* state.duration:get()
+					- kf.t
+				beginTimelineDrag(gui, {
+					onBegin = function()
+						state:pushUndo()
+					end,
+					onMove = function(mouse)
+						kf.t = draggedTime(gui, state, area(), mouse, grab, track, { propKeyframe = kf })
+						diamond.Position = UDim2.fromScale(kf.t / state.duration:get(), 0.5)
+					end,
+					onEnd = function()
+						state:finishDrag()
+					end,
+				}, diamond, input)
+			elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+				local items: { ContextMenu.Item } = {
+					{
+						kind = "header",
+						text = string.format(
+							"%s = %s @ %.2fs",
+							track.propertyName or "?",
+							propValueToText(kf.value),
+							kf.t
+						),
+					},
+					{
+						text = "定位到此帧",
+						onClick = function()
+							state:setTime(kf.t)
+						end,
+					},
+					{
+						text = "改时间(帧)…",
+						onClick = function()
+							local fps = state.fps:get()
+							InputPrompt.show(gui, {
+								title = "关键帧时间(帧)",
+								default = tostring(math.round(kf.t * fps)),
+								onSubmit = function(txt)
+									local f = tonumber(txt)
+									if f then
+										state:pushUndo()
+										kf.t = math.clamp(f / fps, 0, state.duration:get())
+										state:finishDrag()
+									end
+								end,
+							})
+						end,
+					},
+					{
+						text = "改值…",
+						onClick = function()
+							InputPrompt.show(gui, {
+								title = string.format(
+									"%s 的值(%s)",
+									track.propertyName or "?",
+									typeof(kf.value)
+								),
+								default = propValueToText(kf.value),
+								onSubmit = function(txt)
+									local v = propValueFromText(txt, kf.value)
+									if v ~= nil then
+										state:setPropKeyframeValue(track, kf, v)
+									else
+										warn(`[anima] 属性值解析失败:'{txt}'({typeof(kf.value)})`)
+									end
+								end,
+							})
+						end,
+					},
+					{
+						text = "复制(+0.5s)",
+						onClick = function()
+							state:duplicatePropKeyframe(track, kf)
+						end,
+					},
+				}
+				if CutsceneFormat.propValueLerpable(kf.value) then
+					table.insert(items, { kind = "header", text = "缓动" })
+					for _, ez in { "linear", "quadIn", "quadOut", "quadInOut", "cubicInOut", "sine" } do
+						table.insert(items, {
+							text = "  " .. ez,
+							onClick = function()
+								state:setEasing(kf, ez :: any)
+							end,
+						})
+					end
+				end
+				table.insert(items, { kind = "sep" })
+				table.insert(items, {
+					text = "删除关键帧",
+					color = Theme.color.danger,
+					onClick = function()
+						state:removePropKeyframe(track, kf)
+					end,
+				})
+				ContextMenu.show(gui, items)
+			end
+		end,
+		[Children] = e("UICorner")({ CornerRadius = UDim.new(0, 2) }),
+	})
+	return diamond
+end
+
 -- 动画 Clip 条:中间平移;左右缘改 startAt/endAt;录入 id 后自动匹配源时长。
 local function clipBlock(
 	gui: PluginGui,
@@ -1219,8 +1555,13 @@ local function clipBlock(
 		return 1 / math.max(state.fps:get(), 1)
 	end
 
-	local function clipEndVisual(d: number): number
-		return CutsceneFormat.clipTimelineEnd(clip, nextT, nil)
+	-- endAt=nil 时用已缓存的源动画时长(÷speed),宽度即真实时长(18 spec)
+	local function clipEndVisual(_d: number): number
+		return CutsceneFormat.clipTimelineEnd(
+			clip,
+			nextT,
+			AnimationAsset.cachedLength(clip.animationId, clip)
+		)
 	end
 
 	local block
@@ -1592,6 +1933,26 @@ local function eventDiamond(
 							})
 						end,
 					},
+					{
+						text = if ev.payload
+							then "编辑 payload…(" .. payloadToText(ev.payload) .. ")"
+							else "编辑 payload…",
+						onClick = function()
+							InputPrompt.show(gui, {
+								title = "payload(k=v; k2=v2;数字/true/false 自动转型,空=清除)",
+								default = if ev.payload then payloadToText(ev.payload) else "",
+								placeholder = "如 soundId=123456; volume=0.5",
+								onSubmit = function(txt)
+									local payload, err = payloadFromText(txt)
+									if err then
+										warn("[anima] payload 解析失败:" .. err)
+										return
+									end
+									state:setEventPayload(track, ev, payload)
+								end,
+							})
+						end,
+					},
 					{ kind = "sep" },
 					{
 						text = "Delete Marker",
@@ -1620,7 +1981,7 @@ local function eventDiamond(
 	local cap = e("TextLabel")({
 		BackgroundTransparency = 1,
 		AnchorPoint = Vector2.new(0.5, 1),
-		Position = UDim2.new(0.5, 0, 0, 0),
+		Position = UDim2.fromScale(0.5, 0),
 		Size = UDim2.fromOffset(10, 10),
 		Text = "▼",
 		TextColor3 = Theme.color.marker,
@@ -2144,7 +2505,6 @@ local function segmentBlock(
 			table.insert(segMenu, {
 				text = "输入起止帧…",
 				onClick = function()
-					local fps = state.fps:get()
 					local s = seg()
 					InputPrompt.show(gui, {
 						title = "起 止 帧(空格分隔,如 30 90)",
@@ -2255,6 +2615,50 @@ local function trackContent(
 	elseif track.kind == "effect" and track.effectCues and #track.effectCues > 0 then
 		for _, cue in track.effectCues do
 			table.insert(kids, effectCueMarker(gui, state, area, track, cue))
+		end
+	elseif track.kind == "property" and track.propKeyframes then
+		for _, kf in track.propKeyframes do
+			table.insert(kids, propDiamond(gui, state, area, track, kf))
+		end
+	elseif track.kind == "rigAnim" and track.jointTracks and #track.jointTracks > 0 then
+		-- 烘焙关节数据(几十帧/关节):V1 只渲染整块,不做逐 key 编辑(20 spec)
+		local minT, maxT = math.huge, 0
+		for _, jt in track.jointTracks do
+			local first, last = jt.keyframes[1], jt.keyframes[#jt.keyframes]
+			if first and last then
+				minT = math.min(minT, first.t)
+				maxT = math.max(maxT, last.t)
+			end
+		end
+		if maxT > minT then
+			table.insert(
+				kids,
+				e("Frame")({
+					BackgroundColor3 = Theme.trackColor("rigAnim"),
+					BackgroundTransparency = 0.35,
+					BorderSizePixel = 0,
+					Position = UDim2.new(minT / dur, 1, 0, 6),
+					Size = UDim2.new(math.max((maxT - minT) / dur, 0.01), -2, 1, -12),
+					ZIndex = 4,
+					[Children] = {
+						e("UICorner")({ CornerRadius = UDim.new(0, 4) }),
+						e("TextLabel")({
+							BackgroundTransparency = 1,
+							Size = UDim2.fromScale(1, 1),
+							Text = string.format("🦴 %d 关节", #track.jointTracks),
+							TextColor3 = Theme.color.clipLabelText,
+							TextStrokeColor3 = Theme.color.clipLabelStroke,
+							TextStrokeTransparency = 0.35,
+							TextXAlignment = Enum.TextXAlignment.Left,
+							Font = Theme.font.bold,
+							TextSize = 11,
+							TextTruncate = Enum.TextTruncate.AtEnd,
+							ZIndex = 5,
+							[Children] = e("UIPadding")({ PaddingLeft = UDim.new(0, 9) }),
+						}),
+					},
+				})
+			)
 		end
 	elseif track.keyframes then
 		for _, kf in track.keyframes do
@@ -2424,9 +2828,9 @@ local function ruler(
 				AnchorPoint = Vector2.new(0.5, 1),
 				Position = Computed(function()
 					local dur = math.max(state.duration:get(), 1e-3)
-					return UDim2.new(state.currentTime:get() / dur, 0, 1, 0)
+					return UDim2.fromScale(state.currentTime:get() / dur, 1)
 				end),
-				Size = UDim2.new(0, Theme.size.playheadHandleWidth, 0, Theme.size.rulerHeight + Theme.size.playheadHandleExtendUp),
+				Size = UDim2.fromOffset(Theme.size.playheadHandleWidth, Theme.size.rulerHeight + Theme.size.playheadHandleExtendUp),
 				BackgroundTransparency = 1,
 				ClipsDescendants = false,
 				Text = "",
@@ -3015,7 +3419,7 @@ local function labelColumn(
 					then 120
 					elseif track.kind == "cameraMove" then 44
 					else 108
-				local title = TimelineUnity.trackTitle(track)
+				local title = (if track.hidden then "🙈 " else "") .. TimelineUnity.trackTitle(track)
 				local subtitle = TimelineUnity.trackBindingLine(track)
 				local trackIndex = table.find(tracks, track)
 				local selectedStroke = Computed(function()
@@ -3285,7 +3689,7 @@ local function timeline(
 		BorderSizePixel = 0,
 		Size = UDim2.fromScale(1, 1),
 		CanvasSize = Computed(function()
-			return UDim2.new(0, canvasWidthPx:get(), 0, math.max(viewportHeight:get(), 1))
+			return UDim2.fromOffset(canvasWidthPx:get(), math.max(viewportHeight:get(), 1))
 		end),
 		ScrollingDirection = Enum.ScrollingDirection.X,
 		ElasticBehavior = Enum.ElasticBehavior.Never,

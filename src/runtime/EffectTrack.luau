@@ -8,6 +8,7 @@ local RunService = game:GetService("RunService")
 
 local CutsceneFormat = require(script.Parent.Parent.Shared.CutsceneFormat)
 local ForgeEffectPlay = require(script.Parent.Parent.Shared.ForgeEffectPlay)
+local ForgeApproxFx = require(script.Parent.ForgeApproxFx)
 
 local ViewportFxFeedback: any = nil
 do
@@ -128,32 +129,173 @@ function EffectTrack.defaultHandler(cue: CutsceneFormat.EffectCue, target: Insta
 end
 
 local EDITOR_FORGE_DEFAULT_EMIT = 24
+local EDITOR_FORGE_BEAM_FLASH = 0.5
 
+-- 记录原始 Enabled 以便 scrub 停止时还原;同一实例只记第一次(避免记到预览态)。
 local function rememberForgeEnabled(track: EffectTrack, inst: Instance)
-	if inst:IsA("ParticleEmitter") or inst:IsA("Beam") then
-		table.insert(track._editorForgeRestore, {
-			inst = inst,
-			enabled = inst.Enabled,
-		})
+	if not (inst:IsA("ParticleEmitter") or inst:IsA("Beam") or inst:IsA("Trail")) then
+		return
+	end
+	for _, entry in track._editorForgeRestore do
+		if entry.inst == inst then
+			return
+		end
+	end
+	table.insert(track._editorForgeRestore, {
+		inst = inst,
+		enabled = (inst :: any).Enabled,
+	})
+end
+
+local function forgeAttrNumber(inst: Instance, name: string): number?
+	local v = inst:GetAttribute(name)
+	if typeof(v) == "number" then
+		return v
+	end
+	return nil
+end
+
+local function forgeApproxOpts(track: EffectTrack, token: number): ForgeApproxFx.EmitOpts
+	return {
+		isLive = function()
+			return token == track._editorDelayToken
+		end,
+		addCleanup = function(fn: () -> ())
+			table.insert(track._forgeClears, fn)
+		end,
+	}
+end
+
+local function insideViewport(inst: Instance): boolean
+	return inst:FindFirstAncestorOfClass("ViewportFrame") ~= nil
+end
+
+-- 编辑期按 forge-vfx 属性约定逐实例回放(不 require 官方模块,遵守 VFX-DL):
+-- ParticleEmitter:EmitDelay 后,若 EmitDuration>0 临时 Enabled 该时长,再 Emit(EmitCount)。
+-- Beam:EmitDelay 后临时 Enabled(EmitDuration 或默认 0.5s)。Trail:Enabled 至 scrub 停止。
+local function forgeEditorEmitInstance(
+	track: EffectTrack,
+	inst: Instance,
+	token: number,
+	fallbackCount: number
+)
+	local delay = forgeAttrNumber(inst, "EmitDelay") or 0
+
+	if inst:IsA("ParticleEmitter") then
+		local count = math.floor(forgeAttrNumber(inst, "EmitCount") or fallbackCount)
+		local duration = forgeAttrNumber(inst, "EmitDuration") or 0
+		if count <= 0 and duration <= 0 then
+			return
+		end
+		local function fire()
+			if token ~= track._editorDelayToken or not inst.Parent then
+				return
+			end
+			if duration > 0 then
+				rememberForgeEnabled(track, inst)
+				inst.Enabled = true
+				task.delay(duration, function()
+					if token == track._editorDelayToken and inst.Parent then
+						inst.Enabled = false
+					end
+				end)
+			end
+			if count > 0 then
+				inst:Emit(count)
+			end
+			-- 小窗:真粒子渲染不了,用贴图面片模拟(持续型按 Rate×时长折算数量)
+			if insideViewport(inst) then
+				local simCount = if count > 0
+					then count
+					else math.min(30, math.max(1, math.floor(inst.Rate * duration)))
+				ForgeApproxFx.simulateEmitterBurst(inst, simCount, forgeApproxOpts(track, token))
+			end
+		end
+		if delay > 0 then
+			task.delay(delay, fire)
+		else
+			fire()
+		end
+	elseif inst:IsA("Beam") then
+		local duration = forgeAttrNumber(inst, "EmitDuration") or EDITOR_FORGE_BEAM_FLASH
+		local function fire()
+			if token ~= track._editorDelayToken or not inst.Parent then
+				return
+			end
+			rememberForgeEnabled(track, inst)
+			inst.Enabled = true
+			task.delay(duration, function()
+				if token == track._editorDelayToken and inst.Parent then
+					inst.Enabled = false
+				end
+			end)
+			-- 小窗:Beam 渲染不了,附着点之间拉贴图长条模拟
+			if insideViewport(inst) then
+				ForgeApproxFx.simulateBeamFlash(inst, duration, forgeApproxOpts(track, token))
+			end
+		end
+		if delay > 0 then
+			task.delay(delay, fire)
+		else
+			fire()
+		end
+	elseif inst:IsA("Trail") then
+		rememberForgeEnabled(track, inst)
+		inst.Enabled = true
+	elseif inst:IsA("Sound") then
+		local count = forgeAttrNumber(inst, "EmitCount") or 1
+		if count <= 0 then
+			return
+		end
+		local function fire()
+			if token ~= track._editorDelayToken or not inst.Parent then
+				return
+			end
+			pcall(function()
+				inst:Play()
+			end)
+		end
+		if delay > 0 then
+			task.delay(delay, fire)
+		else
+			fire()
+		end
 	end
 end
 
-local function forgeEditorBurstOnRoot(track: EffectTrack, root: Instance, emitCount: number)
-	local function visit(inst: Instance)
-		if inst:IsA("ParticleEmitter") then
-			rememberForgeEnabled(track, inst)
-			inst.Enabled = true
-			inst.LightEmission = math.max(inst.LightEmission, 0.6)
-			inst:Emit(emitCount)
-		elseif inst:IsA("Beam") then
-			rememberForgeEnabled(track, inst)
-			inst.Enabled = true
+local function forgeEditorBurstOnRoot(track: EffectTrack, root: Instance, fallbackCount: number)
+	local token = track._editorDelayToken
+	local approxOpts: ForgeApproxFx.EmitOpts = {
+		isLive = function()
+			return token == track._editorDelayToken
+		end,
+		addCleanup = function(fn: () -> ())
+			table.insert(track._forgeClears, fn)
+		end,
+		onSpawn = function(clone: BasePart)
+			table.insert(track._spawned, clone)
+			-- 克隆里的粒子随克隆一起触发(主视口可见;小窗渲染不了粒子)
+			for _, desc in clone:GetDescendants() do
+				forgeEditorEmitInstance(track, desc, token, fallbackCount)
+			end
+		end,
+	}
+	-- mesh 特效子树整棵交给克隆动画承载(小窗可渲染);RayValue 走属性 tweener。
+	local function walk(inst: Instance)
+		if ForgeApproxFx.isMeshVfx(inst) then
+			ForgeApproxFx.emitMesh(inst :: Model, approxOpts)
+			return
+		end
+		if inst:IsA("RayValue") then
+			ForgeApproxFx.emitTweener(inst, approxOpts)
+			return
+		end
+		forgeEditorEmitInstance(track, inst, token, fallbackCount)
+		for _, c in inst:GetChildren() do
+			walk(c)
 		end
 	end
-	visit(root)
-	for _, desc in root:GetDescendants() do
-		visit(desc)
-	end
+	walk(root)
 end
 
 local function viewportForgeFlash(root: Instance)
@@ -310,6 +452,7 @@ function EffectTrack.runForgeEditorPreview(track: EffectTrack, cue: CutsceneForm
 		warn(`[anima] EffectTrack:forge 预览无有效目标(forgeRoot='{cue.forgeRoot or ""}')`)
 		return
 	end
+	-- 仅当 emitter 自身无 EmitCount 属性时,才退回 cue.emitCount / 默认值。
 	local emitCount = math.max(1, math.floor(cue.emitCount or EDITOR_FORGE_DEFAULT_EMIT))
 	local token = track._editorDelayToken
 	local function burst()

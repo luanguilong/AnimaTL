@@ -32,6 +32,8 @@ local Theme = {
 			event = Color3.fromRGB(100, 180, 255),
 			sound = Color3.fromRGB(156, 120, 255),
 			effect = Color3.fromRGB(255, 112, 198),
+			property = Color3.fromRGB(205, 220, 57),
+			rigAnim = Color3.fromRGB(121, 134, 203),
 		},
 	},
 	-- PluginGui 浮层根(AnimaOverlayHost)统一 ZIndex。子级菜单/输入框用 1–10,勿把 Text 控件设到本值。
