@@ -14,15 +14,21 @@ export type CameraTrack = typeof(setmetatable(
 	{} :: {
 		cutscene: CutsceneFormat.Cutscene,
 		camera: Camera,
+		_resolveBinding: CutsceneFormat.BindingResolver?,
 		_prevType: Enum.CameraType?,
 	},
 	CameraTrack
 ))
 
-function CameraTrack.new(cutscene: CutsceneFormat.Cutscene, camera: Camera): CameraTrack
+function CameraTrack.new(
+	cutscene: CutsceneFormat.Cutscene,
+	camera: Camera,
+	resolveBinding: CutsceneFormat.BindingResolver?
+): CameraTrack
 	return setmetatable({
 		cutscene = cutscene,
 		camera = camera,
+		_resolveBinding = resolveBinding,
 		_prevType = nil,
 	}, CameraTrack)
 end
@@ -35,7 +41,7 @@ end
 
 -- 在时间 t 更新相机位姿(择一求值)。
 function CameraTrack.update(self: CameraTrack, t: number)
-	local cf = CameraDirector.evaluate(self.cutscene, t)
+	local cf = CameraDirector.evaluate(self.cutscene, t, self._resolveBinding)
 	if cf then
 		self.camera.CFrame = cf
 	end

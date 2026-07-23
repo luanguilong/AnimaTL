@@ -2,7 +2,7 @@
 -- CharacterBinder — 把动画轨道播到"真实角色"上,装扮自动跟随。
 --
 -- 核心洞见:Roblox 动画只驱动骨骼关节(Motor6D),不碰外观。
--- 只要 target 是玩家真实的 R15 Character,accessories/body/mesh 会跟着骨骼走,
+-- 只要 target 是玩家真实的 Character,accessories/body/mesh 会跟着骨骼走,
 -- 于是"每个人过场按各自装扮不同"天然成立 —— 本模块不做任何外观处理。
 --
 -- 职责:在给定 Model 上拿到 Animator,LoadAnimation 并按时间轴调度播放/停止。
@@ -60,6 +60,13 @@ function CharacterBinder.load(self: CharacterBinder, animationId: string): Anima
 	local track = self.animator:LoadAnimation(anim)
 	self._tracks[animationId] = track
 	return track
+end
+
+function CharacterBinder.stopClip(self: CharacterBinder, animationId: string, fadeTime: number?)
+	local track = self._tracks[animationId]
+	if track then
+		track:Stop(fadeTime or 0.1)
+	end
 end
 
 -- 播放一个片段。

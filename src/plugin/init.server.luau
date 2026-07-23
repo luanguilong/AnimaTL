@@ -13,15 +13,25 @@ local EditorState = require(script.EditorState)
 local App = require(script.App)
 local Serializer = require(script.Serializer)
 local LivePreview = require(script.LivePreview)
+local Preview = require(script.Preview)
 local PreviewViewport = require(script.PreviewViewport)
 local CameraPath = require(script.CameraPath)
 local Playback = require(script.Playback)
 local Recorder = require(script.Recorder)
 local KeyframeAdjust = require(script.KeyframeAdjust)
+local CameraAuthoring = require(script.CameraAuthoring)
 local VCamAuthoring = require(script.VCamAuthoring)
 local VCam = require(script.Shared.VCam)
 local CutsceneFormat = require(script.Shared.CutsceneFormat)
 local SceneResolver = require(script.SceneResolver)
+local FollowAnchor = require(script.Shared.FollowAnchor)
+local EditorPersistence = require(script.EditorPersistence)
+local InputPrompt = require(script.InputPrompt)
+local ContextMenu = require(script.ContextMenu)
+local CutsceneExport = require(script.CutsceneExport)
+local PathPreviewPrefs = require(script.PathPreviewPrefs)
+
+local ChangeHistoryService = game:GetService("ChangeHistoryService")
 
 -- 载入初始过场:优先用场景里已同步的 boss_intro,否则空模板。
 local function loadInitialCutscene()
@@ -45,6 +55,55 @@ local function loadInitialCutscene()
 end
 
 local plugin = plugin :: Plugin
+
+local DRAFT_DEBOUNCE_SEC = 2
+local EXPORT_TIME_EPS = 1e-4
+local draftSaveScheduled = false
+
+local function resolveInitialCutscene(): CutsceneFormat.Cutscene
+	local draft = EditorPersistence.readDraft(plugin)
+	if draft then
+		local parsed = Serializer.deserialize(draft)
+		if parsed then
+			print("[anima] 已恢复未保存草稿(上次关闭 Studio 前的 Timeline 编辑)")
+			return parsed
+		end
+	end
+	return loadInitialCutscene()
+end
+
+local state: EditorState.EditorState
+local function getCutscene()
+	return state:toCutscene()
+end
+local function getTime()
+	return state.currentTime:get()
+end
+
+local function flushDraftSave()
+	EditorPersistence.saveDraft(plugin, Serializer.serialize(getCutscene()))
+end
+
+local function scheduleDraftSave()
+	if draftSaveScheduled then
+		return
+	end
+	draftSaveScheduled = true
+	task.delay(DRAFT_DEBOUNCE_SEC, function()
+		draftSaveScheduled = false
+		flushDraftSave()
+	end)
+end
+
+local function applyImportedCutscene(cutscene: CutsceneFormat.Cutscene, sourceLabel: string)
+	state:loadCutscene(cutscene)
+	EditorPersistence.clearDraft(plugin)
+	scheduleDraftSave()
+	print(`[anima] 已导入过场 · {sourceLabel}`)
+end
+
+state = EditorState.new(resolveInitialCutscene())
+Preview.cutsceneRevision = state.revision:get()
 local toolbar = plugin:CreateToolbar("Anima")
 local openButton = toolbar:CreateButton("过场编辑器", "打开 Anima Timeline 面板", "")
 openButton.ClickableWhenViewportHidden = true
@@ -65,14 +124,21 @@ local previewWidget = plugin:CreateDockWidgetPluginGui(
 previewWidget.Title = "Anima 相机预览"
 previewWidget.Name = "AnimaCameraPreview"
 
-local state = EditorState.new(loadInitialCutscene())
 local playback = Playback.new(state)
 local recorder = Recorder.new(state)
 local mainPreview = LivePreview.new()
 local mainPreviewActive = Fusion.Value(false)
-local kfAdjust = KeyframeAdjust.new(state)
 local recordActive = Fusion.Value(false)
 local recordingCam: Fusion.Value<string?> = Fusion.Value(nil)
+local kfAdjust = KeyframeAdjust.new(state)
+local cameraAuthoring = CameraAuthoring.new({
+	mainPreview = mainPreview,
+	mainPreviewActive = mainPreviewActive,
+	playback = playback,
+	kfAdjust = kfAdjust,
+	recorder = recorder,
+	recordingCam = recordingCam,
+})
 local standalonePreview = PreviewViewport.new(previewWidget) -- 独立窗口
 local mounted = false
 local lastVcam: string? = nil
@@ -80,19 +146,17 @@ local lastVcam: string? = nil
 local embeddedPreview: PreviewViewport.PreviewViewport? = nil -- 面板内嵌预览
 local cameraPath: CameraPath.CameraPath? = nil
 local pathConn: RBXScriptConnection? = nil
+local pathPreviewInputConn: RBXScriptConnection? = nil
 
-local function getCutscene()
-	return state:toCutscene()
-end
-local function getTime()
-	return state.currentTime:get()
-end
+-- getCutscene / getTime 已在 state 初始化处定义
 
 -- 独立预览窗口开关时启停
 previewWidget:GetPropertyChangedSignal("Enabled"):Connect(function()
 	previewButton:SetActive(previewWidget.Enabled)
 	if previewWidget.Enabled then
-		standalonePreview:start(getCutscene, getTime)
+		standalonePreview:start(getCutscene, getTime, function()
+			return state.revision:get()
+		end)
 	else
 		standalonePreview:stop()
 	end
@@ -145,13 +209,169 @@ local function purgeVcamRefs(name: string)
 	state:commitTracks(true)
 end
 
+-- 当前选中的轨道对象(按 state.selectedTrack 索引取);无选中返回 nil。
+local function selectedTrackObj()
+	local idx = state.selectedTrack:get()
+	if not idx then
+		return nil
+	end
+	return state.tracks:get()[idx]
+end
+
+local function cameraPathRebuildOpts(): CameraPath.RebuildOpts
+	return {
+		hideTangentGizmos = kfAdjust.current:get() ~= nil or playback.isPlaying:get(),
+		previewPrefs = PathPreviewPrefs.load(plugin),
+	}
+end
+
+local function rebuildCameraPathNow()
+	if cameraPath then
+		cameraPath:rebuild(getCutscene(), selectedTrackObj(), cameraPathRebuildOpts())
+	end
+end
+
+-- 打帧后让 vcam Part 与视口一致(M3 策略 A,便于继续 WASD 摆下一帧)。
+local function syncVcamPartFromCFrame(vcamName: string, cf: CFrame)
+	local part = VCam.find(vcamName)
+	if part then
+		part.CFrame = cf
+	end
+end
+
+local function bindingResolver(name: string): Instance?
+	return SceneResolver.resolve(name)
+end
+
+local function onCaptureCameraTrack(track: CutsceneFormat.Track, t: number?)
+	local cam = workspace.CurrentCamera
+	if not cam then
+		return
+	end
+	if track.kind ~= "camera" then
+		return
+	end
+	local at = t or state.currentTime:get()
+	local stored = FollowAnchor.storeKeyframeCFrame(track, cam.CFrame, bindingResolver)
+	state:captureFrame(track, stored, at)
+	syncVcamPartFromCFrame(track.target, cam.CFrame)
+	print(
+		`[anima] 已在 {string.format("%.2fs", at)} 采集视口位姿 → 相机轨 '{track.target}'`
+	)
+end
+
+local function onCaptureAtPlayhead()
+	local track = selectedTrackObj()
+	if not track then
+		print("[anima] 打帧 K:请先选中一条 camera / cameraMove 轨")
+		return
+	end
+	if track.kind == "camera" then
+		onCaptureCameraTrack(track, nil)
+	elseif track.kind == "cameraMove" then
+		local cam = workspace.CurrentCamera
+		if not cam then
+			return
+		end
+		state:captureFrame(track, cam.CFrame, nil)
+		syncVcamPartFromCFrame(track.target, cam.CFrame)
+		print(
+			`[anima] 已在 {string.format("%.2fs", state.currentTime:get())} 采集视口位姿 → 运动轨 '{track.target}'`
+		)
+	else
+		print("[anima] 打帧 K:请先选中 camera 或 cameraMove 轨")
+	end
+end
+
+local function promptExportToPlace(gui: PluginGui)
+	local defaultName = state.name:get()
+	if defaultName == "untitled" or defaultName == "" then
+		defaultName = "my_cutscene"
+	end
+	InputPrompt.show(gui, {
+		title = "导出 · 模块名",
+		default = defaultName,
+		placeholder = "如 ult_slash / boss_intro",
+		onSubmit = function(moduleName)
+			if moduleName == "" then
+				return
+			end
+			InputPrompt.show(gui, {
+				title = "导出 · 子路径(可选)",
+				default = "",
+				placeholder = "留空=Cutscenes 根; 例 Skills/Ult",
+				onSubmit = function(subPath)
+					local cs = getCutscene()
+					local fps = math.max(cs.fps or 30, 1)
+					local fullDur = cs.duration
+					local totalFrames = math.round(fullDur * fps)
+					InputPrompt.show(gui, {
+						title = "导出区间 · 起始",
+						default = "0",
+						placeholder = "帧(整数)或秒(小数);留空=0",
+						onSubmit = function(startTxt)
+							InputPrompt.show(gui, {
+								title = "导出区间 · 结束",
+								default = tostring(totalFrames),
+								placeholder = `留空=总帧 {totalFrames}`,
+								onSubmit = function(endTxt)
+									local fromSec = CutsceneExport.parseExportTimeInput(startTxt, fps, 0)
+									local toSec = CutsceneExport.parseExportTimeInput(endTxt, fps, fullDur)
+									if fromSec == nil or toSec == nil then
+										warn("[anima] 导出区间无效:请输入数字(帧或秒)")
+										return
+									end
+									if fromSec < -EXPORT_TIME_EPS or toSec > fullDur + EXPORT_TIME_EPS or fromSec >= toSec - EXPORT_TIME_EPS then
+										warn(
+											string.format(
+												"[anima] 导出区间无效:需满足 0 <= 起始 < 结束 <= %.2fs",
+												fullDur
+											)
+										)
+										return
+									end
+									local sliced, sliceWarnings = CutsceneExport.slice(cs, fromSec, toSec)
+									for _, w in sliceWarnings do
+										warn(w)
+									end
+									print(CutsceneExport.formatExportRangeLog(fromSec, toSec, fps, sliced.duration))
+									local ok, mod, reqPath = pcall(CutsceneExport.writeModule, sliced, subPath, moduleName)
+									if not ok or not mod then
+										warn(tostring(mod))
+										return
+									end
+									CutsceneExport.writeAnimaExportString((mod :: ModuleScript).Source)
+									state.name:set(moduleName)
+									ChangeHistoryService:SetWaypoint("Anima 导出过场")
+									Selection:Set({ mod :: ModuleScript })
+									EditorPersistence.clearDraft(plugin)
+									scheduleDraftSave()
+									local fileHint = CutsceneExport.suggestedFilePath(subPath, moduleName)
+									print(`[anima] 已导出 ModuleScript → ReplicatedStorage.{reqPath}`)
+									print(`[anima] 程序 require: ReplicatedStorage.{reqPath}`)
+									print(`[anima] Git/Rojo 建议路径: {fileHint}`)
+									print("[anima] 副本仍在 ReplicatedStorage.AnimaExport(供 MCP 写盘)")
+								end,
+							})
+						end,
+					})
+				end,
+			})
+		end,
+	})
+end
+
 local callbacks: App.Callbacks = {
 	isPlaying = playback.isPlaying,
 	loop = playback.loop,
 	mainPreviewActive = mainPreviewActive,
 	recordActive = recordActive,
+	authoringMode = cameraAuthoring.authoringMode,
 
 	onPlayPause = function()
+		if not playback.isPlaying:get() and cameraAuthoring:isActive() then
+			cameraAuthoring:exit("播放")
+		end
 		kfAdjust:stop() -- 播放接管相机,先退出对帧调整
 		playback:toggle()
 	end,
@@ -165,6 +385,9 @@ local callbacks: App.Callbacks = {
 	-- 录制开关(auto-key):开始前先关主视口跟随,让视口/gizmo 可自由摆布
 	onToggleRecord = function()
 		if not recorder.active then
+			if cameraAuthoring:isActive() then
+				cameraAuthoring:exit("Record 录制")
+			end
 			kfAdjust:stop()
 			if mainPreview.active then
 				mainPreview:stop()
@@ -188,9 +411,13 @@ local callbacks: App.Callbacks = {
 			mainPreview:stop()
 			mainPreviewActive:set(false)
 			print("[anima] 主视口跟随已关闭,相机已归还")
+			cameraAuthoring:syncFromTrack(selectedTrackObj())
 		else
+			if cameraAuthoring:isActive() then
+				cameraAuthoring:exit("主视口跟随")
+			end
 			kfAdjust:stop()
-			mainPreview:start(getCutscene, getTime)
+			mainPreview:start(getCutscene, getTime, bindingResolver)
 			mainPreviewActive:set(true)
 			print("[anima] 主视口跟随已开启")
 		end
@@ -205,7 +432,8 @@ local callbacks: App.Callbacks = {
 		end
 		local name = VCamAuthoring.nextName()
 		VCamAuthoring.create(name, cam.CFrame)
-		state:addCameraTrack(name, 0, state.duration:get(), nil)
+		local idx = state:addCameraTrack(name, 0, state.duration:get(), nil)
+		state.selectedTrack:set(idx)
 		lastVcam = name
 		print(
 			`[anima] 新建独立相机轨 {name} @ {string.format("%.2fs", state.currentTime:get())}`
@@ -232,23 +460,82 @@ local callbacks: App.Callbacks = {
 		end
 	end,
 
-	onExport = function()
-		local src = Serializer.serialize(getCutscene())
-		local holder = ReplicatedStorage:FindFirstChild("AnimaExport")
-		if not holder then
-			holder = Instance.new("StringValue")
-			holder.Name = "AnimaExport"
-			holder.Parent = ReplicatedStorage
+	onExport = function(gui: PluginGui)
+		promptExportToPlace(gui)
+	end,
+
+	onSaveAsModule = function(gui: PluginGui)
+		promptExportToPlace(gui)
+	end,
+
+	onNewDocument = function()
+		state:loadCutscene(EditorState.emptyUntitled())
+		EditorPersistence.clearDraft(plugin)
+		scheduleDraftSave()
+		print("[anima] 新建空白过场 untitled")
+	end,
+
+	onRestoreDraft = function()
+		local draft = EditorPersistence.readDraft(plugin)
+		if not draft then
+			print("[anima] 没有可恢复的 Plugin 草稿")
+			return
 		end
-		(holder :: StringValue).Value = src
-		print("[anima] 已导出到 ReplicatedStorage.AnimaExport(供 MCP 取出写回文件)")
+		local parsed = Serializer.deserialize(draft)
+		if parsed then
+			state:loadCutscene(parsed)
+			print("[anima] 已从 Plugin 草稿恢复")
+		else
+			warn("[anima] 草稿损坏,无法反序列化")
+		end
+	end,
+
+	onImportMenu = function(gui: PluginGui)
+		ContextMenu.show(gui, {
+			{ kind = "header", text = "导入过场到 Timeline" },
+			{
+				text = "从 ReplicatedStorage.AnimaExport",
+				onClick = function()
+					local holder = ReplicatedStorage:FindFirstChild("AnimaExport")
+					if not holder or not holder:IsA("StringValue") or holder.Value == "" then
+						warn("[anima] 找不到 AnimaExport 或为空,请先 💾 导出或粘贴源码")
+						return
+					end
+					local parsed = Serializer.deserialize(holder.Value)
+					if not parsed then
+						warn("[anima] AnimaExport 内容无法解析")
+						return
+					end
+					applyImportedCutscene(parsed, "AnimaExport")
+				end,
+			},
+			{
+				text = "从 Explorer 选中 ModuleScript",
+				onClick = function()
+					local sel = Selection:Get()
+					if #sel ~= 1 or not sel[1]:IsA("ModuleScript") then
+						warn("[anima] 请在 Explorer 中选中一个 cutscene ModuleScript")
+						return
+					end
+					local ok, data = pcall(require, sel[1])
+					if not ok or type(data) ~= "table" or type(data.tracks) ~= "table" then
+						warn("[anima] 所选模块不是有效的 cutscene 表")
+						return
+					end
+					applyImportedCutscene(data :: CutsceneFormat.Cutscene, sel[1].Name)
+				end,
+			},
+		}, { width = 260 })
 	end,
 
 	-- init 把内嵌预览挂进面板容器
 	mountPreview = function(container)
 		local pv = PreviewViewport.new(container)
-		pv:start(getCutscene, getTime)
+		pv:start(getCutscene, getTime, function()
+			return state.revision:get()
+		end)
 		embeddedPreview = pv
+		Preview.skipWorkspaceMedia = true
 	end,
 
 	onSelectVcam = function(name)
@@ -341,20 +628,42 @@ local callbacks: App.Callbacks = {
 			)
 		end
 	end,
+	onCaptureCameraTrack = onCaptureCameraTrack,
+	onCaptureAtPlayhead = onCaptureAtPlayhead,
 
 	recordingCam = recordingCam,
 
-	-- ＋摄像机:当前视口位姿建 vcam + 一条独立相机轨(生效区间默认整段)
-	onAddCameraTrack = function(group)
-		local cam = workspace.CurrentCamera
-		if not cam then
+	onJumpToCameraKeyframe = function(track, kf)
+		if kfAdjust.current:get() then
+			kfAdjust:stop()
+		end
+		state:setTime(kf.t)
+		local idx = table.find(state.tracks:get(), track)
+		if idx then
+			state.selectedTrack:set(idx)
+		end
+		local cf = kf.value
+		if typeof(cf) ~= "CFrame" then
 			return
 		end
-		local name = VCamAuthoring.nextName()
-		VCamAuthoring.create(name, cam.CFrame)
-		state:addCameraTrack(name, 0, state.duration:get(), group)
-		lastVcam = name
-		print(`[anima] 新建独立相机轨 {name} — 用行内 ⏺ 录制运镜(起止两帧)`)
+		if track.kind == "camera" then
+			cf = FollowAnchor.worldFromKeyframeCFrame(track, cf, bindingResolver)
+		end
+		local vcamName = track.target
+		if track.kind == "cameraMove" and vcamName ~= "" then
+			cameraAuthoring:snapViewport(vcamName, cf)
+		elseif track.kind == "camera" and vcamName ~= "" then
+			cameraAuthoring:snapViewport(vcamName, cf)
+		else
+			local cam = workspace.CurrentCamera
+			if cam then
+				cam.CameraType = Enum.CameraType.Custom
+				cam.CFrame = cf
+			end
+		end
+		print(
+			`[anima] 已跳到关键帧 @ {string.format("%.2fs", kf.t)} — 可用 WASD 微调视口,按 K 写回选中轨`
+		)
 	end,
 
 	-- 相机轨行内录制:点开始记第一段起点+起始帧,点结束记第一段止+结束帧(采视口相机位姿)。整段一步撤销。
@@ -362,6 +671,11 @@ local callbacks: App.Callbacks = {
 		local cam = workspace.CurrentCamera
 		if not cam then
 			return
+		end
+		if recordingCam:get() ~= track.target then
+			if cameraAuthoring:isActive() then
+				cameraAuthoring:exit("相机轨录制")
+			end
 		end
 		if not track.segments or #track.segments == 0 then
 			track.segments = { { from = 0, to = 0 } }
@@ -371,16 +685,22 @@ local callbacks: App.Callbacks = {
 		if recordingCam:get() == track.target then
 			seg.to = math.max(t, seg.from)
 			recordingCam:set(nil)
-			state:captureFrameNoUndo(track, cam.CFrame)
+			state:captureFrameNoUndo(
+				track,
+				FollowAnchor.storeKeyframeCFrame(track, cam.CFrame, bindingResolver)
+			)
 			print(`[anima] 相机轨 {track.target} 录制结束 @ {string.format("%.2f", t)}s`)
 		else
 			state:pushUndo()
 			seg.from = t
 			seg.to = t
 			recordingCam:set(track.target)
-			state:captureFrameNoUndo(track, cam.CFrame)
+			state:captureFrameNoUndo(
+				track,
+				FollowAnchor.storeKeyframeCFrame(track, cam.CFrame, bindingResolver)
+			)
 			print(
-				`[anima] 相机轨 {track.target} 开始录制 @ {string.format("%.2f", t)}s — scrub 到结束帧、在视口移动相机、再点 ⏺`
+				`[anima] 相机轨 {track.target} 开始录制 @ {string.format("%.2f", t)}s — 与透视编辑互斥;日常摆镜建议 WASD + K`
 			)
 		end
 	end,
@@ -393,6 +713,9 @@ local callbacks: App.Callbacks = {
 	adjustingKf = kfAdjust.current,
 	onAdjustKeyframe = function(track, kf)
 		if kfAdjust.current:get() ~= kf then
+			if cameraAuthoring:isActive() then
+				cameraAuthoring:exit("视口对帧")
+			end
 			if mainPreview.active then
 				mainPreview:stop()
 				mainPreviewActive:set(false)
@@ -418,15 +741,39 @@ local callbacks: App.Callbacks = {
 		kfAdjust:stop()
 		print("[anima] 视口对帧调整结束")
 	end,
+	appendPathPreviewMenuItems = function(gui: PluginGui, items: { ContextMenu.Item })
+		table.insert(items, { kind = "sep" })
+		for _, it in PathPreviewPrefs.menuItems(gui, plugin, rebuildCameraPathNow) do
+			table.insert(items, it)
+		end
+	end,
 }
 
--- 当前选中的轨道对象(按 state.selectedTrack 索引取);无选中返回 nil。
-local function selectedTrackObj()
-	local idx = state.selectedTrack:get()
-	if not idx then
-		return nil
+local function applyTangentEdit(ed: CameraPath.TangentEdit)
+	local tr = ed.track
+	if not tr.keyframes then
+		return
 	end
-	return state.tracks:get()[idx]
+	local kf = tr.keyframes[ed.kfIndex]
+	if not kf or not kf.value then
+		return
+	end
+	local anchorWorld = FollowAnchor.worldFromKeyframeCFrame(tr, kf.value, bindingResolver)
+	local delta = ed.worldControl - anchorWorld.Position
+	local stored = FollowAnchor.worldDeltaToStoredOffset(tr, delta, bindingResolver)
+	local symmetric = UserInputService:IsKeyDown(Enum.KeyCode.LeftAlt)
+		or UserInputService:IsKeyDown(Enum.KeyCode.RightAlt)
+	if ed.field == "out" then
+		kf.outTangent = stored
+		if symmetric then
+			kf.inTangent = -stored
+		end
+	else
+		kf.inTangent = stored
+		if symmetric then
+			kf.outTangent = -stored
+		end
+	end
 end
 
 -- 面板打开时:确保挂载 + 启动运镜轨迹;关闭时销毁轨迹与内嵌预览。
@@ -435,33 +782,40 @@ local function startCameraPath()
 		return
 	end
 	local cp = CameraPath.new()
-	cp:rebuild(getCutscene(), selectedTrackObj())
+	cp:rebuild(getCutscene(), selectedTrackObj(), cameraPathRebuildOpts())
 	cameraPath = cp
-	-- 机位把手反向编辑:把手被 Studio 移动/旋转工具挪动 → 写回对应关键帧。
-	-- 间隔 >1s 的新一轮拖拽压一次 undo;commit 节流,轨迹/朝向杆 0.2s 重画一次。
-	local lastHandleEdit = 0
+	-- 机位把手反向编辑(M5:一次拖拽一步 undo;authoring 下仍可拖把手改已有 key)。
+	local handleUndoArmed = false
+	local lastHandleActivity = 0
+	local HANDLE_UNDO_GAP = 0.4
 	local lastHandleCommit = 0
 	local handleDirty = false
 	pathConn = RunService.RenderStepped:Connect(function()
 		local ok, err = pcall(function()
 			cp:updateHead(getCutscene(), getTime())
 			local edits = cp:consumeHandleEdits()
-			if #edits > 0 then
-				local tr = selectedTrackObj()
-				if tr and tr.kind == "camera" and tr.keyframes then
-					local now = os.clock()
-					if now - lastHandleEdit > 1 then
-						state:pushUndo()
-					end
-					lastHandleEdit = now
-					for _, ed in edits do
+			local tanEdits = cp:consumeTangentEdits()
+			if #edits > 0 or #tanEdits > 0 then
+				if not handleUndoArmed then
+					state:pushUndo()
+					handleUndoArmed = true
+				end
+				lastHandleActivity = os.clock()
+				for _, ed in edits do
+					local tr = ed.track
+					if tr.keyframes then
 						local kf = tr.keyframes[ed.kfIndex]
 						if kf then
-							kf.value = ed.cf
+							kf.value = FollowAnchor.storeKeyframeCFrame(tr, ed.cf, bindingResolver)
 						end
 					end
-					handleDirty = true
 				end
+				for _, ed in tanEdits do
+					applyTangentEdit(ed)
+				end
+				handleDirty = true
+			elseif handleUndoArmed and os.clock() - lastHandleActivity >= HANDLE_UNDO_GAP then
+				handleUndoArmed = false
 			end
 			if handleDirty and os.clock() - lastHandleCommit >= 0.2 then
 				handleDirty = false
@@ -473,9 +827,45 @@ local function startCameraPath()
 			warn("[anima] 轨迹更新出错:", err)
 		end
 	end)
+	if pathPreviewInputConn then
+		pathPreviewInputConn:Disconnect()
+	end
+	pathPreviewInputConn = UserInputService.InputBegan:Connect(function(input: InputObject, processed: boolean)
+		if processed then
+			return
+		end
+		if input.UserInputType ~= Enum.UserInputType.MouseButton2 then
+			return
+		end
+		if not widget.Enabled or not cameraPath then
+			return
+		end
+		local sel = Selection:Get()
+		if #sel ~= 1 then
+			return
+		end
+		local inst = sel[1]
+		if not inst:IsA("BasePart") then
+			return
+		end
+		local root = workspace:FindFirstChild("AnimaCameraPath")
+		if not root or not inst:IsDescendantOf(root) then
+			return
+		end
+		local tangentFolder = root:FindFirstChild("TangentHandles")
+		if tangentFolder and inst:IsDescendantOf(tangentFolder) then
+			task.defer(function()
+				PathPreviewPrefs.showContextMenu(widget, plugin, rebuildCameraPathNow)
+			end)
+		end
+	end)
 end
 
 local function stopCameraPath()
+	if pathPreviewInputConn then
+		pathPreviewInputConn:Disconnect()
+		pathPreviewInputConn = nil
+	end
 	if pathConn then
 		pathConn:Disconnect()
 		pathConn = nil
@@ -499,12 +889,45 @@ local function ensureMounted()
 			embeddedPreview:stop()
 			embeddedPreview = nil
 		end
+		Preview.skipWorkspaceMedia = false
 		mounted = false -- 面板关了 GUI 被销毁,重开需重挂
 	end
 end
 
+Fusion.Observer(kfAdjust.current):onChange(function()
+	if cameraPath then
+		cameraPath:rebuild(getCutscene(), selectedTrackObj(), cameraPathRebuildOpts())
+	end
+end)
+
+Fusion.Observer(playback.isPlaying):onChange(function()
+	if cameraPath then
+		cameraPath:rebuild(getCutscene(), selectedTrackObj(), cameraPathRebuildOpts())
+	end
+	if playback.isPlaying:get() then
+		local cutscene = getCutscene()
+		local fxCount = 0
+		for _, tr in cutscene.tracks do
+			if tr.kind == "effect" and tr.effectCues then
+				fxCount += #tr.effectCues
+				print(`[anima] 播放:特效轨 '{tr.target}' · {#tr.effectCues} 个 cue`)
+				for _, c in tr.effectCues do
+					local mode = if c.emitMode == "forge" then "forge" else "particle"
+					print(`  · t={string.format("%.2f", c.t)}s mode={mode}`)
+				end
+			end
+		end
+		if fxCount == 0 then
+			print("[anima] 播放:当前过场没有特效 cue(请检查特效轨是否有菱形)")
+		end
+	end
+end)
+
 -- 结构性变更(revision)时刷新预览克隆 + 重画运镜轨迹。
 Fusion.Observer(state.revision):onChange(function()
+	Preview.cutsceneRevision = state.revision:get()
+	scheduleDraftSave()
+	Preview.clearAnimationCache()
 	if embeddedPreview then
 		embeddedPreview:refresh()
 	end
@@ -512,16 +935,25 @@ Fusion.Observer(state.revision):onChange(function()
 		standalonePreview:refresh()
 	end
 	if cameraPath then
-		cameraPath:rebuild(getCutscene(), selectedTrackObj())
+		cameraPath:rebuild(getCutscene(), selectedTrackObj(), cameraPathRebuildOpts())
 	end
 end)
 
--- 选中轨道变化时:只重画运镜轨迹(不动预览)。
-Fusion.Observer(state.selectedTrack):onChange(function()
-	if cameraPath then
-		cameraPath:rebuild(getCutscene(), selectedTrackObj())
+-- 拖播放头 / 播放时:场景 Rig 动画预览(主视口跟随开启时由 LivePreview 统一驱动,避免双份)。
+Fusion.Observer(state.currentTime):onChange(function()
+	if widget.Enabled and not mainPreview.active then
+		Preview.applyAt(getCutscene(), getTime(), false)
 	end
 end)
+
+-- 选中轨道变化时:运镜轨迹 + 相机轨透视编辑(A)。
+Fusion.Observer(state.selectedTrack):onChange(function()
+	if cameraPath then
+		cameraPath:rebuild(getCutscene(), selectedTrackObj(), cameraPathRebuildOpts())
+	end
+end)
+
+cameraAuthoring:bind(state, selectedTrackObj)
 
 -- 面板内的撤销/重做快捷键(仅当鼠标在时间轴面板内,避免与 Studio 撤销打架)。
 UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: boolean)
@@ -538,7 +970,11 @@ UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: 
 	end
 	-- 空格 / Enter:播放暂停(面板聚焦、非输入态)
 	if input.KeyCode == Enum.KeyCode.Space or input.KeyCode == Enum.KeyCode.Return then
-		playback:toggle()
+		callbacks.onPlayPause()
+		return
+	end
+	if input.KeyCode == Enum.KeyCode.K then
+		onCaptureAtPlayhead()
 		return
 	end
 	local ctrl = UserInputService:IsKeyDown(Enum.KeyCode.LeftControl)
@@ -572,7 +1008,9 @@ end)
 
 -- 卸载清理
 plugin.Unloading:Connect(function()
+	flushDraftSave()
 	stopCameraPath()
+	cameraAuthoring:exit()
 	kfAdjust:stop()
 	recorder:stop()
 	if mainPreview.active then

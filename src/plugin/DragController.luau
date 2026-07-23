@@ -8,10 +8,16 @@ local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
 
 local Theme = require(script.Parent.Theme)
+local OverlayHost = require(script.Parent.OverlayHost)
 
 local DragController = {}
 
-local activeSession: { stop: () -> () }? = nil
+type Session = {
+	stop: () -> (),
+	cancel: () -> (),
+}
+
+local activeSession: Session? = nil
 
 local DRAG_THRESHOLD = 4
 
@@ -20,11 +26,13 @@ export type Handlers = {
 	onMove: (mouse: Vector2) -> (),
 	onEnd: (() -> ())?,
 	onClick: (() -> ())?,
+	onCancel: (() -> ())?,
 	threshold: number?,
 	holdTime: number?,
 	holdDrag: boolean?,
 	feedbackElement: GuiObject?,
 	pressSource: GuiObject?,
+	pressInput: InputObject?,
 }
 
 function DragController.isDragging(): boolean
@@ -33,7 +41,7 @@ end
 
 function DragController.begin(gui: PluginGui, handlers: Handlers): () -> ()
 	if activeSession then
-		activeSession.stop()
+		activeSession.cancel()
 	end
 
 	local conns: { RBXScriptConnection } = {}
@@ -47,7 +55,7 @@ function DragController.begin(gui: PluginGui, handlers: Handlers): () -> ()
 	local buttonHeld = true
 
 	local cancelled = false
-	local cancel: () -> ()
+	local editTouched = false
 	local feedback = handlers.feedbackElement
 	local feedbackBaseTransparency: number? = nil
 	if feedback and feedback:IsA("GuiObject") then
@@ -55,7 +63,10 @@ function DragController.begin(gui: PluginGui, handlers: Handlers): () -> ()
 	end
 
 	local overlay: Frame? = nil
+	local stop: () -> ()
+	local cancel: () -> ()
 	local fire: () -> ()
+	local pressInput = handlers.pressInput
 
 	local function setHoldFeedback(progress: number?)
 		if not feedback or feedbackBaseTransparency == nil then
@@ -75,6 +86,53 @@ function DragController.begin(gui: PluginGui, handlers: Handlers): () -> ()
 		end
 	end
 
+	local function finishHandlers()
+		if cancelled then
+			return
+		end
+		if armed and draggedSinceArm then
+			handlers.onMove(gui:GetRelativeMousePosition())
+			if handlers.onEnd then
+				handlers.onEnd()
+			end
+		else
+			if handlers.onClick then
+				handlers.onClick()
+			end
+		end
+	end
+
+	stop = function()
+		if stopped then
+			return
+		end
+		stopped = true
+		for _, c in conns do
+			c:Disconnect()
+		end
+		table.clear(conns)
+		destroyOverlay()
+		setHoldFeedback(nil)
+		activeSession = nil
+		finishHandlers()
+	end
+
+	cancel = function()
+		if editTouched and handlers.onCancel then
+			handlers.onCancel()
+		end
+		cancelled = true
+		stop()
+	end
+
+	local function onMouse1Release(_input: InputObject)
+		if not buttonHeld then
+			return
+		end
+		buttonHeld = false
+		stop()
+	end
+
 	local function ensureOverlay()
 		if overlay then
 			return
@@ -83,9 +141,9 @@ function DragController.begin(gui: PluginGui, handlers: Handlers): () -> ()
 		o.Name = "AnimaDragOverlay"
 		o.BackgroundTransparency = 1
 		o.Size = UDim2.fromScale(1, 1)
-		o.ZIndex = Theme.overlayZIndex
+		o.ZIndex = 1
 		o.Active = true
-		o.Parent = gui
+		o.Parent = OverlayHost.ensure(gui)
 		overlay = o
 
 		table.insert(
@@ -100,19 +158,24 @@ function DragController.begin(gui: PluginGui, handlers: Handlers): () -> ()
 			conns,
 			o.InputEnded:Connect(function(input: InputObject)
 				if input.UserInputType == Enum.UserInputType.MouseButton1 then
-					buttonHeld = false
-					stop()
+					onMouse1Release(input)
+				end
+			end)
+		)
+		table.insert(
+			conns,
+			o.InputBegan:Connect(function(input: InputObject)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 then
+					cancel()
 				end
 			end)
 		)
 	end
 
-	local function onMouse1Release(_input: InputObject)
-		buttonHeld = false
-		stop()
-	end
-
 	local function tryDragMove(mouse: Vector2)
+		if not buttonHeld then
+			return
+		end
 		if handlers.holdDrag then
 			local origin = armPos or startPos
 			if not draggedSinceArm then
@@ -122,6 +185,7 @@ function DragController.begin(gui: PluginGui, handlers: Handlers): () -> ()
 				draggedSinceArm = true
 				if handlers.onBegin then
 					handlers.onBegin()
+					editTouched = true
 				end
 			end
 		elseif not draggedSinceArm then
@@ -131,13 +195,18 @@ function DragController.begin(gui: PluginGui, handlers: Handlers): () -> ()
 			draggedSinceArm = true
 			if handlers.onBegin then
 				handlers.onBegin()
+				editTouched = true
 			end
 		end
 		handlers.onMove(mouse)
 	end
 
-	function fire()
+	fire = function()
 		if stopped then
+			return
+		end
+		if pressInput and buttonHeld and pressInput.UserInputState == Enum.UserInputState.End then
+			onMouse1Release(pressInput)
 			return
 		end
 		if armed and handlers.holdDrag and not buttonHeld then
@@ -169,12 +238,12 @@ function DragController.begin(gui: PluginGui, handlers: Handlers): () -> ()
 			end
 			armed = true
 			armPos = mouse
-			if handlers.holdDrag then
+			if not handlers.holdDrag then
 				ensureOverlay()
-			else
 				draggedSinceArm = true
 				if handlers.onBegin then
 					handlers.onBegin()
+					editTouched = true
 				end
 				handlers.onMove(mouse)
 			end
@@ -183,39 +252,7 @@ function DragController.begin(gui: PluginGui, handlers: Handlers): () -> ()
 		tryDragMove(mouse)
 	end
 
-	local function stop()
-		if stopped then
-			return
-		end
-		stopped = true
-		for _, c in conns do
-			c:Disconnect()
-		end
-		table.clear(conns)
-		destroyOverlay()
-		setHoldFeedback(nil)
-		activeSession = nil
-		if cancelled then
-			return
-		end
-		if armed and draggedSinceArm then
-			handlers.onMove(gui:GetRelativeMousePosition())
-			if handlers.onEnd then
-				handlers.onEnd()
-			end
-		else
-			if handlers.onClick then
-				handlers.onClick()
-			end
-		end
-	end
-
-	cancel = function()
-		cancelled = true
-		stop()
-	end
-
-	activeSession = { stop = stop }
+	activeSession = { stop = stop, cancel = cancel }
 
 	local pressSource = handlers.pressSource or handlers.feedbackElement
 	if pressSource then
@@ -236,6 +273,14 @@ function DragController.begin(gui: PluginGui, handlers: Handlers): () -> ()
 	table.insert(conns, RunService.RenderStepped:Connect(fire))
 	table.insert(
 		conns,
+		UserInputService.InputChanged:Connect(function(input: InputObject)
+			if input.UserInputType == Enum.UserInputType.MouseMovement then
+				fire()
+			end
+		end)
+	)
+	table.insert(
+		conns,
 		UserInputService.InputEnded:Connect(function(input: InputObject)
 			if input.UserInputType == Enum.UserInputType.MouseButton1 then
 				onMouse1Release(input)
@@ -244,7 +289,7 @@ function DragController.begin(gui: PluginGui, handlers: Handlers): () -> ()
 	)
 	table.insert(conns, gui.WindowFocusReleased:Connect(function()
 		buttonHeld = false
-		stop()
+		cancel()
 	end))
 
 	return stop
@@ -263,10 +308,11 @@ function DragController.attach(
 	end)
 end
 
-function DragController.fracInArea(area: GuiObject, mouse: Vector2): number
-	local x0 = area.AbsolutePosition.X
+-- mouse 为 PluginGui:GetRelativeMousePosition();area 须为该 PluginGui 后代。
+function DragController.fracInArea(area: GuiObject, mouse: Vector2, pluginGui: PluginGui): number
+	local areaLeft = area.AbsolutePosition.X - pluginGui.AbsolutePosition.X
 	local w = math.max(area.AbsoluteSize.X, 1)
-	return math.clamp((mouse.X - x0) / w, 0, 1)
+	return math.clamp((mouse.X - areaLeft) / w, 0, 1)
 end
 
 function DragController.snapTime(
@@ -274,26 +320,40 @@ function DragController.snapTime(
 	duration: number,
 	candidates: { number }?,
 	thresholdSec: number,
-	disable: boolean?
+	disable: boolean?,
+	priorityCandidates: { number }?
 ): number
 	if disable then
 		return t
 	end
 	local best = t
 	local bestDist = thresholdSec
+	local bestPriority = false
+
+	local function consider(c: number, priority: boolean)
+		local d = math.abs(t - c)
+		if d > bestDist then
+			return
+		end
+		if d < bestDist or (d == bestDist and priority and not bestPriority) then
+			best = c
+			bestDist = d
+			bestPriority = priority
+		end
+	end
+
 	local sec = math.floor(t + 0.5)
 	if sec >= 0 and sec <= duration then
-		local d = math.abs(t - sec)
-		if d < bestDist then
-			best, bestDist = sec, d
+		consider(sec, false)
+	end
+	if priorityCandidates then
+		for _, c in priorityCandidates do
+			consider(c, true)
 		end
 	end
 	if candidates then
 		for _, c in candidates do
-			local d = math.abs(t - c)
-			if d < bestDist then
-				best, bestDist = c, d
-			end
+			consider(c, false)
 		end
 	end
 	return best

@@ -6,6 +6,7 @@
 
 ## P0 — 手感与近处闭环(优先)
 
+- **相机轨跟随绑定**（Player/HRP 相对 key、统一求值）：规格见 [06 — 相机轨跟随绑定](06-camera-follow-binding-spec.md)。实现顺序 M1 契约 → M2 `CameraDirector` → M3 面板芯片 → M4 录制/预览闭环。
 - **时间轴缩放 + 横向滚动**(最影响手感):定位从 `t/duration`(Scale)改为 `pixelsPerSecond + 滚动偏移`(ScrollingFrame / 视口变换)。带来:长过场可展开、拖拽更精细、滚轮缩放、拖动画布平移。App 坐标系较大重构,但值得。
 - **补齐半成品入口**:
   - vcam / 轨道 **改名**:右键→内联 TextBox 覆盖编辑,回车提交(复用一个 `promptText` helper)。

@@ -10,6 +10,9 @@ local Theme = {
 		line = Color3.fromRGB(35, 35, 35),
 		text = Color3.fromRGB(210, 210, 210),
 		textDim = Color3.fromRGB(130, 130, 130),
+		-- 时间条(绿/蓝等彩色块)内文案:浅字+描边,避免与条色糊在一起
+		clipLabelText = Color3.fromRGB(255, 255, 255),
+		clipLabelStroke = Color3.fromRGB(0, 0, 0),
 		accent = Color3.fromRGB(68, 136, 255),
 		playhead = Color3.fromRGB(255, 80, 80),
 		selection = Color3.fromRGB(68, 136, 255),
@@ -27,10 +30,12 @@ local Theme = {
 			cameraMove = Color3.fromRGB(77, 182, 172),
 			transform = Color3.fromRGB(255, 167, 38),
 			event = Color3.fromRGB(100, 180, 255),
+			sound = Color3.fromRGB(156, 120, 255),
+			effect = Color3.fromRGB(255, 112, 198),
 		},
 	},
-	-- PluginGui 浮层(菜单/输入/拖拽)统一 ZIndex。勿用极大值(如 2^30),会导致文字不渲染。
-	overlayZIndex = 10000,
+	-- PluginGui 浮层根(AnimaOverlayHost)统一 ZIndex。子级菜单/输入框用 1–10,勿把 Text 控件设到本值。
+	overlayZIndex = 100,
 	size = {
 		topbar = 34,
 		trackHeight = 40,
@@ -41,9 +46,12 @@ local Theme = {
 		previewHeight = 156, -- 内嵌预览横条高度
 		vcamBar = 26, -- vcam 管理条高度
 		menuRow = 24, -- 右键菜单行高
-		menuWidth = 150,
-		playheadLineWidth = 3, -- 竖线像素宽
-		playheadHandleWidth = 48, -- 标尺行内倒三角热区宽
+		menuWidth = 200,
+		playheadLineWidth = 2,
+		playheadHandleWidth = 40,
+		playheadHandleExtendUp = 14, -- 倒三角热区向上多出(便于点在帧号上方)
+		playheadTriangleWidth = 12,
+		playheadTriangleHeight = 10,
 	},
 	font = {
 		main = Enum.Font.Gotham,
@@ -54,6 +62,17 @@ local Theme = {
 -- 按轨道类型取色
 function Theme.trackColor(kind: string): Color3
 	return Theme.color.track[kind] or Theme.color.textDim
+end
+
+local CLIP_LABEL_STROKE_TRANSPARENCY = 0.35
+
+-- 动画/相机时间条上的 TextLabel 统一高对比样式
+function Theme.styleTimelineClipLabel(label: TextLabel)
+	label.TextColor3 = Theme.color.clipLabelText
+	label.TextStrokeColor3 = Theme.color.clipLabelStroke
+	label.TextStrokeTransparency = CLIP_LABEL_STROKE_TRANSPARENCY
+	label.Font = Theme.font.bold
+	label.TextSize = 11
 end
 
 return Theme

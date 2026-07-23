@@ -23,7 +23,7 @@ Roblox 过场动画 Studio 插件。交付两部分:
 ## 核心技术洞见
 
 - **"每个人过场按装扮不同"几乎免费**:Roblox 动画只驱动骨骼关节(Motor6D CFrame),不碰外观。同一 AnimationId 在角色上播,装扮/配件自动跟骨骼。运行时把动画绑到玩家真实 Character 即可。
-- **项目定用 R6 骨架**:R6 = 6 部件 5 Motor6D,手臂整块无肘,开门靠肩转;R6 动画与 R15 不通用。运行时代码 rig 无关(Humanoid→Animator→LoadAnimation)。
+- **动画资产分 Rig**:R6 与 R15 的 AnimationId 不通用;同过场可在一条 animation 轨挂两条 clip(各带 `rigType`),运行时/预览按 Humanoid.RigType 择一。`clipMatchesRig` / `clipsForRig` 见 CutsceneFormat(08 spec)。运行时代码 rig 无关(Humanoid→Animator→LoadAnimation)。
 - **vcam 相机模型(Cinemachine 式)**:vcam = `workspace.AnimaVCams` 下隐形 Part。`Part.CFrame`=机位(看向 Front/-Z),Attribute `LookAt`=目标名(自动看向),`FOV`=视野。解析 `src/shared/VCam`,blend 求值 `src/shared/CameraEval`。
 - **编辑预览复用运行时求值**:插件 scrub/预览用同一套 Sampler/CameraEval,所以运行时先行、插件预览几乎免费。
 

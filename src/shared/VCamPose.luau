@@ -13,7 +13,7 @@ local VCamPose = {}
 function VCamPose.at(cutscene: CutsceneFormat.Cutscene, name: string, t: number): CFrame?
 	for _, tr in cutscene.tracks do
 		if tr.kind == "cameraMove" and tr.target == name and tr.keyframes and #tr.keyframes > 0 then
-			return Sampler.sampleCFrame(tr.keyframes, t)
+			return Sampler.sampleTrackCFrame(tr, t)
 		end
 	end
 	return VCam.resolvePose(name)

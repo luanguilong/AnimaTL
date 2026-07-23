@@ -9,6 +9,10 @@
 local Shared = script.Parent.Shared
 local CameraDirector = require(Shared.CameraDirector)
 local CutsceneFormat = require(Shared.CutsceneFormat)
+local FollowAnchor = require(Shared.FollowAnchor)
+local VCamPose = require(Shared.VCamPose)
+local SceneResolver = require(script.Parent.SceneResolver)
+local PathPreviewPrefs = require(script.Parent.PathPreviewPrefs)
 
 local CameraPath = {}
 CameraPath.__index = CameraPath
@@ -17,10 +21,35 @@ local FOLDER = "AnimaCameraPath"
 local STEP = 0.1 -- 采样步长(秒)
 local MAX_SEG = 240 -- 段数上限
 
--- 机位把手被 Studio 工具挪动后的回报(kfIndex = 选中相机轨 keyframes 里的序号)
-export type HandleEdit = { kfIndex: number, cf: CFrame }
+-- 机位把手被 Studio 工具挪动后的回报(指向具体轨 + keyframes 序号)
+export type HandleEdit = { track: CutsceneFormat.Track, kfIndex: number, cf: CFrame }
 
-type Handle = { part: BasePart, lastCF: CFrame, kfIndex: number }
+export type TangentEdit = {
+	track: CutsceneFormat.Track,
+	kfIndex: number,
+	field: "out" | "in",
+	worldControl: Vector3,
+}
+
+export type RebuildOpts = {
+	hideTangentGizmos: boolean?,
+	previewPrefs: PathPreviewPrefs.Prefs?,
+}
+
+type TangentHandle = {
+	part: BasePart,
+	lastPos: Vector3,
+	kfIndex: number,
+	field: "out" | "in",
+	track: CutsceneFormat.Track,
+}
+
+type Handle = {
+	part: BasePart,
+	lastCF: CFrame,
+	kfIndex: number,
+	track: CutsceneFormat.Track,
+}
 
 export type CameraPath = typeof(setmetatable(
 	{} :: {
@@ -28,12 +57,49 @@ export type CameraPath = typeof(setmetatable(
 		curve: Folder,
 		markers: Folder,
 		handles: Folder,
+		tangentArms: Folder,
+		tangentHandles: Folder,
 		head: BasePart,
 		visible: boolean,
+		_hideTangentGizmos: boolean,
 		_handles: { Handle },
+		_tangentHandles: { TangentHandle },
 	},
 	CameraPath
 ))
+
+local COLOR_CURVE = Color3.fromRGB(80, 160, 255)
+local COLOR_HANDLE_CAM = Color3.fromRGB(90, 230, 200)
+local COLOR_HANDLE_MOVE = Color3.fromRGB(210, 140, 255)
+local COLOR_COMPOSITE = Color3.fromRGB(255, 170, 60)
+local COLOR_TANGENT_ARM = Color3.fromRGB(140, 140, 160)
+local COLOR_TANGENT_OUT = Color3.fromRGB(255, 120, 180)
+local COLOR_TANGENT_IN = Color3.fromRGB(120, 200, 255)
+
+local function isVcamRelatedTrack(tr: CutsceneFormat.Track?): boolean
+	return tr ~= nil and (tr.kind == "camera" or tr.kind == "cameraMove") and tr.target ~= ""
+end
+
+local function findCameraTrackForTarget(
+	cutscene: CutsceneFormat.Cutscene,
+	name: string
+): CutsceneFormat.Track?
+	for _, tr in cutscene.tracks do
+		if tr.kind == "camera" and tr.target == name then
+			return tr
+		end
+	end
+	return nil
+end
+
+-- 在某 camera 轨生效段内,该 vcam 此刻的位姿(轨上 key 优先,否则 cameraMove / 静态机位)。
+local function poseOnCameraTrack(
+	cutscene: CutsceneFormat.Cutscene,
+	camTr: CutsceneFormat.Track,
+	t: number
+): CFrame?
+	return CameraDirector.poseForCameraTrack(cutscene, camTr, t, SceneResolver.resolve)
+end
 
 local HANDLE_POS_EPS = 0.01
 local HANDLE_ROT_EPS = 0.005
@@ -85,6 +151,14 @@ function CameraPath.new(): CameraPath
 	handles.Name = "Handles"
 	handles.Parent = folder
 
+	local tangentArms = Instance.new("Folder")
+	tangentArms.Name = "TangentArms"
+	tangentArms.Parent = folder
+
+	local tangentHandles = Instance.new("Folder")
+	tangentHandles.Name = "TangentHandles"
+	tangentHandles.Parent = folder
+
 	local head = newPart("Head", Vector3.new(0.7, 0.7, 0.7), Color3.fromRGB(255, 220, 60))
 	head.Shape = Enum.PartType.Ball
 	head.Parent = folder
@@ -96,19 +170,23 @@ function CameraPath.new(): CameraPath
 		curve = curve,
 		markers = markers,
 		handles = handles,
+		tangentArms = tangentArms,
+		tangentHandles = tangentHandles,
 		head = head,
 		visible = true,
+		_hideTangentGizmos = false,
 		_handles = {},
+		_tangentHandles = {},
 	}, CameraPath)
 end
 
 -- 机位把手:可被 Studio 选中并用移动/旋转工具直接摆(反向编辑),
 -- 与 newPart 的纯可视化部件不同 —— 不锁定、可点选;长方体让朝向可见。
-local function newHandle(index: number): BasePart
+local function newHandle(label: string, color: Color3): BasePart
 	local p = Instance.new("Part")
-	p.Name = "机位" .. index
+	p.Name = label
 	p.Size = Vector3.new(0.7, 0.7, 1.2)
-	p.Color = Color3.fromRGB(90, 230, 200)
+	p.Color = color
 	p.Material = Enum.Material.Neon
 	p.Transparency = 0.15
 	p.Anchored = true
@@ -133,57 +211,113 @@ local function connect(parent: Instance, a: Vector3, b: Vector3, color: Color3)
 	seg.Parent = parent
 end
 
--- 选中某条相机轨:画该轨的运镜轨迹(蓝)+ 机位标记。
--- 未选中 / 非相机轨:画"整条成片运镜"(橙,全时间轴求值的最终镜头轨迹),
--- 让轨迹在场景里常驻可见,不会一取消选中就消失。
+local function newTangentHandle(label: string, color: Color3): BasePart
+	local p = Instance.new("Part")
+	p.Name = label
+	p.Size = Vector3.new(0.45, 0.45, 0.45)
+	p.Shape = Enum.PartType.Ball
+	p.Color = color
+	p.Material = Enum.Material.Neon
+	p.Transparency = 0.1
+	p.Anchored = true
+	p.CanCollide = false
+	p.CanQuery = true
+	p.CanTouch = false
+	p.Locked = false
+	p.Archivable = false
+	return p
+end
+
+local function controlWorld(
+	track: CutsceneFormat.Track,
+	storedCf: CFrame,
+	storedOffset: Vector3?,
+	resolveBinding: CutsceneFormat.BindingResolver
+): (Vector3, Vector3)
+	local worldAnchor = FollowAnchor.worldFromKeyframeCFrame(track, storedCf, resolveBinding)
+	local p0 = worldAnchor.Position
+	local delta = FollowAnchor.storedOffsetToWorldDelta(track, storedOffset or Vector3.zero, resolveBinding)
+	return p0, p0 + delta
+end
+
+local function posDiffers(a: Vector3, b: Vector3): boolean
+	return (a - b).Magnitude > HANDLE_POS_EPS
+end
+
+-- 选中 camera / cameraMove(同 target):合并蓝线 + 两轨关键帧把手(分色)。
+-- 未选中 / 非相机相关轨:画整条成片运镜(橙)。
 function CameraPath.rebuild(
 	self: CameraPath,
 	cutscene: CutsceneFormat.Cutscene,
-	selected: CutsceneFormat.Track?
+	selected: CutsceneFormat.Track?,
+	opts: RebuildOpts?
 )
+	local previewPrefs = if opts and opts.previewPrefs then opts.previewPrefs else nil
 	self.curve:ClearAllChildren()
 	self.markers:ClearAllChildren()
+	self.tangentArms:ClearAllChildren()
 
-	if not selected or selected.kind ~= "camera" then
-		-- 无选中轨 → 没有可编辑的机位,清掉把手
+	if not isVcamRelatedTrack(selected) then
 		for _, h in self._handles do
 			h.part:Destroy()
 		end
 		table.clear(self._handles)
+		for _, th in self._tangentHandles do
+			th.part:Destroy()
+		end
+		table.clear(self._tangentHandles)
 		local dur = cutscene.duration
 		if dur > 0 then
-			local n = math.clamp(math.floor(dur / STEP), 1, MAX_SEG)
-			local composite = Color3.fromRGB(255, 170, 60)
+			local n = PathPreviewPrefs.sampleCountForSpan(dur, STEP, previewPrefs)
 			local prev: Vector3? = nil
 			for i = 0, n do
-				local cf = CameraDirector.evaluate(cutscene, dur * (i / n))
+				local cf = CameraDirector.evaluate(cutscene, dur * (i / n), SceneResolver.resolve)
 				if cf then
 					if prev then
-						connect(self.curve, prev, cf.Position, composite)
+						connect(self.curve, prev, cf.Position, COLOR_COMPOSITE)
 					end
 					prev = cf.Position
 				else
-					prev = nil -- 无相机覆盖的时间段自然断开
+					prev = nil
 				end
 			end
 		end
 		return
 	end
-	local tr = selected
-	local color = Color3.fromRGB(80, 160, 255)
 
-	-- 曲线:沿该轨每个生效段 [from,to] 采样它自己的位姿(有 keyframes 则运动,否则静态/运动轨);段间断开
-	for _, sgm in CutsceneFormat.segmentsOf(tr) do
+	local tr = selected :: CutsceneFormat.Track
+	local vcamName = tr.target
+	local camTr = if tr.kind == "camera" then tr else findCameraTrackForTarget(cutscene, vcamName)
+	local sampleStep = STEP
+	if tr.pathMode == "bezier" or (camTr and camTr.pathMode == "bezier") then
+		sampleStep = STEP * 0.5
+	end
+
+	local spans: { { from: number, to: number } } = {}
+	if camTr then
+		for _, s in CutsceneFormat.segmentsOf(camTr) do
+			table.insert(spans, { from = s.from, to = s.to })
+		end
+	elseif tr.kind == "cameraMove" then
+		table.insert(spans, { from = 0, to = cutscene.duration })
+	end
+
+	for _, sgm in spans do
 		local span = math.max(sgm.to - sgm.from, 0)
-		local n = math.clamp(math.floor(span / STEP), 1, MAX_SEG)
+		local n = PathPreviewPrefs.sampleCountForSpan(span, sampleStep, previewPrefs)
 		local prev: Vector3? = nil
 		for i = 0, n do
 			local t = sgm.from + span * (i / n)
-			local cf = CameraDirector.evaluate(cutscene, t)
+			local cf: CFrame? = nil
+			if camTr then
+				cf = poseOnCameraTrack(cutscene, camTr, t)
+			else
+				cf = VCamPose.at(cutscene, vcamName, t)
+			end
 			if cf then
 				local pos = cf.Position
 				if prev then
-					connect(self.curve, prev, pos, color)
+					connect(self.curve, prev, pos, COLOR_CURVE)
 				end
 				prev = pos
 			else
@@ -192,21 +326,42 @@ function CameraPath.rebuild(
 		end
 	end
 
-	-- 机位把手:该轨每个关键帧一个,可用 Studio 移动/旋转工具直接摆(反向编辑)。
-	-- 就地复用已有把手(拖拽中销毁重建会让 Studio 工具丢失目标),多退少补;
-	-- 只有数据侧变了(undo / 面板编辑)才把位姿写回把手,不打断进行中的拖拽。
-	local wanted: { { kfIndex: number, cf: CFrame } } = {}
-	if tr.keyframes then
-		for i, kf in tr.keyframes do
-			if kf.value then
-				table.insert(wanted, { kfIndex = i, cf = kf.value })
+	type Wanted = { track: CutsceneFormat.Track, kfIndex: number, cf: CFrame, kind: string }
+	local wanted: { Wanted } = {}
+	for _, track in cutscene.tracks do
+		if (track.kind == "camera" or track.kind == "cameraMove") and track.target == vcamName then
+			if track.keyframes then
+				for i, kf in track.keyframes do
+					if kf.value then
+						local worldCf = FollowAnchor.worldFromKeyframeCFrame(
+							track,
+							kf.value,
+							SceneResolver.resolve
+						)
+						table.insert(wanted, {
+							track = track,
+							kfIndex = i,
+							cf = worldCf,
+							kind = track.kind,
+						})
+					end
+				end
 			end
 		end
 	end
+
 	for i = #self._handles + 1, #wanted do
-		local part = newHandle(i)
+		local w = wanted[i]
+		local color = if w.kind == "cameraMove" then COLOR_HANDLE_MOVE else COLOR_HANDLE_CAM
+		local prefix = if w.kind == "cameraMove" then "运镜" else "机位"
+		local part = newHandle(prefix .. w.kfIndex, color)
 		part.Parent = self.handles
-		self._handles[i] = { part = part, lastCF = CFrame.new(math.huge, 0, 0), kfIndex = 0 }
+		self._handles[i] = {
+			part = part,
+			lastCF = CFrame.new(math.huge, 0, 0),
+			kfIndex = 0,
+			track = w.track,
+		}
 	end
 	for i = #self._handles, #wanted + 1, -1 do
 		self._handles[i].part:Destroy()
@@ -215,13 +370,90 @@ function CameraPath.rebuild(
 	for i, w in wanted do
 		local h = self._handles[i]
 		h.kfIndex = w.kfIndex
+		h.track = w.track
+		local color = if w.kind == "cameraMove" then COLOR_HANDLE_MOVE else COLOR_HANDLE_CAM
+		h.part.Color = color
+		h.part.Name = (if w.kind == "cameraMove" then "运镜" else "机位") .. w.kfIndex
 		if cfDiffers(h.lastCF, w.cf) then
 			h.part.CFrame = w.cf
 			h.lastCF = w.cf
 		end
-		-- 朝向短杆(纯可视化,随重画刷新)
 		local look = w.cf.Position - w.cf.LookVector * 1.6
 		connect(self.markers, w.cf.Position, look, Color3.fromRGB(230, 200, 90))
+	end
+
+	type TanWanted = {
+		track: CutsceneFormat.Track,
+		kfIndex: number,
+		field: "out" | "in",
+		pos: Vector3,
+		color: Color3,
+	}
+	local tanWanted: { TanWanted } = {}
+	local hideTangents = if opts then opts.hideTangentGizmos == true else false
+	if not hideTangents then
+		for _, track in cutscene.tracks do
+			if
+				(track.kind == "camera" or track.kind == "cameraMove")
+				and track.target == vcamName
+				and track.pathMode == "bezier"
+				and track.keyframes
+			then
+				for i, kf in track.keyframes do
+					if kf.value then
+						local anchorPos, outPos =
+							controlWorld(track, kf.value, kf.outTangent, SceneResolver.resolve)
+						connect(self.tangentArms, anchorPos, outPos, COLOR_TANGENT_ARM)
+						table.insert(tanWanted, {
+							track = track,
+							kfIndex = i,
+							field = "out",
+							pos = outPos,
+							color = COLOR_TANGENT_OUT,
+						})
+						local _, inPos = controlWorld(track, kf.value, kf.inTangent, SceneResolver.resolve)
+						connect(self.tangentArms, anchorPos, inPos, COLOR_TANGENT_ARM)
+						table.insert(tanWanted, {
+							track = track,
+							kfIndex = i,
+							field = "in",
+							pos = inPos,
+							color = COLOR_TANGENT_IN,
+						})
+					end
+				end
+			end
+		end
+	end
+
+	for i = #self._tangentHandles + 1, #tanWanted do
+		local w = tanWanted[i]
+		local label = if w.field == "out" then "切线出" else "切线入"
+		local part = newTangentHandle(label .. w.kfIndex, w.color)
+		part.Parent = self.tangentHandles
+		self._tangentHandles[i] = {
+			part = part,
+			lastPos = Vector3.new(math.huge, 0, 0),
+			kfIndex = 0,
+			field = w.field,
+			track = w.track,
+		}
+	end
+	for i = #self._tangentHandles, #tanWanted + 1, -1 do
+		self._tangentHandles[i].part:Destroy()
+		self._tangentHandles[i] = nil
+	end
+	for i, w in tanWanted do
+		local th = self._tangentHandles[i]
+		th.kfIndex = w.kfIndex
+		th.field = w.field
+		th.track = w.track
+		th.part.Color = w.color
+		th.part.Name = (if w.field == "out" then "切线出" else "切线入") .. w.kfIndex
+		if posDiffers(th.lastPos, w.pos) then
+			th.part.CFrame = CFrame.new(w.pos)
+			th.lastPos = w.pos
+		end
 	end
 end
 
@@ -232,7 +464,23 @@ function CameraPath.consumeHandleEdits(self: CameraPath): { HandleEdit }
 	for _, h in self._handles do
 		if h.part.Parent and h.kfIndex > 0 and cfDiffers(h.lastCF, h.part.CFrame) then
 			h.lastCF = h.part.CFrame
-			table.insert(out, { kfIndex = h.kfIndex, cf = h.part.CFrame })
+			table.insert(out, { track = h.track, kfIndex = h.kfIndex, cf = h.part.CFrame })
+		end
+	end
+	return out
+end
+
+function CameraPath.consumeTangentEdits(self: CameraPath): { TangentEdit }
+	local out: { TangentEdit } = {}
+	for _, th in self._tangentHandles do
+		if th.part.Parent and th.kfIndex > 0 and posDiffers(th.lastPos, th.part.Position) then
+			th.lastPos = th.part.Position
+			table.insert(out, {
+				track = th.track,
+				kfIndex = th.kfIndex,
+				field = th.field,
+				worldControl = th.part.Position,
+			})
 		end
 	end
 	return out
@@ -240,7 +488,7 @@ end
 
 -- 每帧更新播放头处的滑动点。
 function CameraPath.updateHead(self: CameraPath, cutscene: CutsceneFormat.Cutscene, t: number)
-	local cf = CameraDirector.evaluate(cutscene, t)
+	local cf = CameraDirector.evaluate(cutscene, t, SceneResolver.resolve)
 	if cf then
 		self.head.Transparency = 0
 		self.head.CFrame = CFrame.new(cf.Position)

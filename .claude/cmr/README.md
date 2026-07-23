@@ -15,6 +15,12 @@
 | [02-todo.md](02-todo.md) | 未完成 / 待办 / 已知取舍 |
 | [03-roadmap.md](03-roadmap.md) | 后续增加功能 + 改善手感的规划(分优先级) |
 | [04-features.md](04-features.md) | **功能清单快照**(按代码现状分区列表 + 验证状态 ✅/🟡/⚠️) |
+| [05-camera-authoring-spec.md](05-camera-authoring-spec.md) | **相机轨透视编辑(视口 A)** M0 行为约定 |
+| [06-camera-follow-binding-spec.md](06-camera-follow-binding-spec.md) | **followBinding** 相对关键帧 |
+| [07-camera-bezier-path-spec.md](07-camera-bezier-path-spec.md) | **贝塞尔路径 + 切线 gizmo** M0–M4 实现规格 |
+| [08-animation-rig-type-spec.md](08-animation-rig-type-spec.md) | **AnimationClip.rigType** R6/R15 单文件双 clip |
+| [09-sound-effect-tracks-spec.md](09-sound-effect-tracks-spec.md) | **sound / effect 轨** |
+| [10-editor-persistence-spec.md](10-editor-persistence-spec.md) | **草稿 / 导入 / 另存** |
 
 ## 一句话现状(截至 2026-07-16)
 

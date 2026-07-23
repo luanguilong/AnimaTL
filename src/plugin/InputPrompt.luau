@@ -4,6 +4,7 @@
 -- 供 AnimationId / 事件名 / speed / vcam 改名等复用。
 
 local Theme = require(script.Parent.Theme)
+local OverlayHost = require(script.Parent.OverlayHost)
 
 local InputPrompt = {}
 
@@ -26,15 +27,18 @@ end
 function InputPrompt.show(gui: PluginGui, opts: Options)
 	InputPrompt.close()
 
+	local baseZ = 1
+
 	-- 注意:DockWidget 里嵌套 ScreenGui 不渲染,浮层必须用普通 Frame
 	-- 直接挂在 PluginGui 下(同 ContextMenu / DragController overlay 做法)。
 	local holder = Instance.new("Frame")
 	holder.Name = "AnimaInputPrompt"
 	holder.BackgroundTransparency = 1
 	holder.Size = UDim2.fromScale(1, 1)
-	holder.ZIndex = Theme.overlayZIndex
-	holder.Parent = gui
+	holder.ZIndex = baseZ
+	holder.Parent = OverlayHost.ensure(gui)
 	current = holder
+	OverlayHost.bringToFront(gui)
 
 	local shade = Instance.new("TextButton")
 	shade.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
@@ -42,7 +46,7 @@ function InputPrompt.show(gui: PluginGui, opts: Options)
 	shade.Size = UDim2.fromScale(1, 1)
 	shade.Text = ""
 	shade.AutoButtonColor = false
-	shade.ZIndex = 1
+	shade.ZIndex = baseZ
 	shade.Activated:Connect(InputPrompt.close)
 	shade.Parent = holder
 
@@ -52,7 +56,7 @@ function InputPrompt.show(gui: PluginGui, opts: Options)
 	panel.AnchorPoint = Vector2.new(0.5, 0.5)
 	panel.Position = UDim2.fromScale(0.5, 0.5)
 	panel.Size = UDim2.fromOffset(320, 118)
-	panel.ZIndex = 2
+	panel.ZIndex = baseZ + 1
 	local corner = Instance.new("UICorner")
 	corner.CornerRadius = UDim.new(0, 6)
 	corner.Parent = panel
@@ -72,7 +76,7 @@ function InputPrompt.show(gui: PluginGui, opts: Options)
 	title.Font = Theme.font.bold
 	title.TextSize = 13
 	title.TextXAlignment = Enum.TextXAlignment.Left
-	title.ZIndex = 2
+	title.ZIndex = 3
 	title.Parent = panel
 
 	local box = Instance.new("TextBox")
@@ -87,7 +91,7 @@ function InputPrompt.show(gui: PluginGui, opts: Options)
 	box.TextSize = 13
 	box.ClearTextOnFocus = false
 	box.TextXAlignment = Enum.TextXAlignment.Left
-	box.ZIndex = 2
+	box.ZIndex = 3
 	local bcorner = Instance.new("UICorner")
 	bcorner.CornerRadius = UDim.new(0, 4)
 	bcorner.Parent = box
@@ -119,7 +123,7 @@ function InputPrompt.show(gui: PluginGui, opts: Options)
 		btn.TextColor3 = Theme.color.text
 		btn.Font = Theme.font.bold
 		btn.TextSize = 12
-		btn.ZIndex = 2
+		btn.ZIndex = 3
 		local c = Instance.new("UICorner")
 		c.CornerRadius = UDim.new(0, 4)
 		c.Parent = btn

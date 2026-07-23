@@ -1,57 +1,124 @@
-# anima
+# Anima
 
-Roblox 过场动画(cutscene)系统:**Studio 插件(制作)+ 运行时播放模块(游戏内)**。
+Roblox 过场动画（cutscene）系统：**Studio 插件（制作）+ 运行时播放（游戏内）**。
 
-标杆场景:人物开门 → 镜头环绕人物 → 拉远到 Boss 站位;运行时绑定玩家**真实 Character**,每个玩家过场按各自装扮不同呈现。
+标杆场景：人物开门 → 镜头环绕 → 特效（Forge）→ 拉远；运行时绑定玩家 **真实 Character**，装扮随骨骼自动跟随。
+
+---
+
+## 仓库与文档地址
+
+| 说明 | 地址 |
+|------|------|
+| **本仓库（实现 + 插件源码）** | https://github.com/luanguilong/AnimaTL |
+| **AI / 同事交接索引** | [AI-HANDOFF.md](./AI-HANDOFF.md) |
+| **功能清单（实现快照）** | [.claude/cmr/04-features.md](./.claude/cmr/04-features.md) |
+| **规格索引（CMR）** | [.claude/cmr/README.md](./.claude/cmr/README.md) |
+| **B2 模板仓（仅 anima 设计规格对表）** | https://github.com/showhand-org/template/tree/main/anima |
+| **Forge VFX emit 模块（特效轨对齐）** | https://github.com/zilibobi/forge-vfx |
+
+---
+
+## 功能介绍
+
+### 编辑器（Studio 插件）
+
+- **Timeline**：动画 / 相机 / 变换 / 事件 / **音效** / **特效** 多轨；磁吸、时长、导出区间等（见 CMR 11–14）。
+- **相机**：虚拟相机（VCam）、贝塞尔路径、**followBinding** 相对关键帧（跟 Player / HRP）、视口 A 透视打帧（CMR 05–07）。
+- **动画**：`AnimationClip`、R6/R15 `rigType`、时长匹配（CMR 08、11）。
+- **特效轨**：
+  - **particle**：模板名 / LoadAsset 粒子；
+  - **forge**：对齐 [forge-vfx](https://github.com/zilibobi/forge-vfx) 的 `vfx.init()` + `vfx.emit(绑定实例)`（CMR **16**）。
+- **持久化**：未保存草稿、💾 导出到 `ReplicatedStorage.Anima.Cutscenes`（CMR 10）。
+- **构建插件**：`rojo build plugin.project.json -o build/anima.rbxm` → 安装到 `%LOCALAPPDATA%\Roblox\Plugins\`。
+
+### 运行时（游戏内）
+
+- **`CutscenePlayer`**：按时间轴驱动相机、动画、变换、事件、音效、特效。
+- **`CharacterBinder`**：动画绑真实 Character，装扮自然跟随。
+- **`EffectTrack` + `ForgeEffectPlay`**：客户端走官方 **`vfx.emit`**；过场结束对 `EmitResult:Clear()`。
+- **示例启动**：`src/client/AnimaBootstrap.client.luau` — 进游戏按 **`V`** 播放 **`Player_lvti`**（需 `Cutscenes.Player_lvti` + `ReplicatedStorage.ForgeVFX`）。
+
+### 示例过场（`cutscenes/`）
+
+| 模块 | 说明 |
+|------|------|
+| `boss_intro.luau` | 手写示例 |
+| `Player_lvti.luau` | Player 绑定 + 相机 follow + Forge「驴踢」演示 |
+| `rig1_lvti.luau` | 旧 Rig 占位示例（可被 Timeline 导出覆盖） |
+
+---
 
 ## 核心设计
 
-- **数据契约唯一真相**:`src/shared/CutsceneFormat.luau`。插件"生产"过场数据,运行时"消费"它,两边不互相依赖。
-- **概念模型借鉴 UE Sequencer / Unity Timeline**:`Cutscene → tracks[] → keyframes[]`,每条 track 有一个 `target`(Binding 逻辑名),运行时映射到真实实例。
-- **装扮跟随是天然特性**:Roblox 动画只驱动骨骼关节(Motor6D),不碰外观。把动画绑到玩家真实 R15 Character 上播,accessories/装扮自动跟随。见 `CharacterBinder`。
+- **数据契约唯一真相**：`src/shared/CutsceneFormat.luau`。插件生产数据，运行时消费，互不 require。
+- **概念模型**：借鉴 UE Sequencer / Unity Timeline — `Cutscene → tracks[] → keyframes / cues`。
+- **绑定**：轨上 `target` 为逻辑名；运行时由 **`BindingResolver`** 解析（如 `"Player"` → `LocalPlayer.Character`）。
+
+---
 
 ## 目录
 
 ```
-src/shared/     CutsceneFormat / Easing / Sampler   —— 编辑&运行时共用契约
-src/runtime/    CutscenePlayer + CameraTrack/CharacterBinder/TransformTrack/EventTrack
-src/client/     AnimaBootstrap.client —— client 端播放示例
-src/plugin/     Studio 插件(阶段二,Fusion UI + 关键帧采集)
-cutscenes/      过场数据资源(boss_intro 为手写示例)
+src/shared/     CutsceneFormat、Sampler、FollowAnchor、ForgeEffectPlay …
+src/runtime/    CutscenePlayer、CameraTrack、EffectTrack、SoundTrack …
+src/client/     AnimaBootstrap — 按 V 播放 Player_lvti
+src/plugin/     Studio 插件（Fusion UI、导出、预览）
+cutscenes/      过场 ModuleScript 源码（Rojo 同步到 ReplicatedStorage.Anima.Cutscenes）
+.claude/cmr/    实现侧规格 05–16
+AI-HANDOFF.md   后续 AI 入口
 ```
 
-轨道类型:`animation`(角色动画)/ `camera`(镜头 CFrame)/ `transform`(门、Boss 的 CFrame)/ `event`(音效、粒子、切镜)。
+---
 
 ## 开发环境
 
-代码/git/rojo 在 Linux VM;Roblox Studio 在本地 Windows,走 rojo 局域网同步 + roblox-studio MCP 验证。
-
 ```bash
-rokit install                                   # 装 rojo/stylua/selene
-rojo serve                                      # VM 上起同步服务(Studio Rojo 插件连 192.168.110.69:34872)
-rojo build default.project.json -o game.rbxlx   # 或直接 build 游戏
-rojo build plugin.project.json  -o anima.rbxm   # build 插件
-stylua src cutscenes && selene src cutscenes    # 格式化 + lint
+rokit install
+rojo serve default.project.json    # 同步 Runtime + Cutscenes + Bootstrap
+rojo build plugin.project.json -o build/anima.rbxm
+rojo build default.project.json -o build/game.rbxlx
+stylua src cutscenes && selene src cutscenes
 ```
 
-## 运行时用法
+Windows 本机常见流程：Rojo 连 Studio + 将 `build/anima.rbxm` 拷入 Plugins 目录。
+
+---
+
+## 运行时接入（概要）
 
 ```lua
+local CutscenePlayer = require(ReplicatedStorage.Anima.Runtime.CutscenePlayer)
+local cutscene = require(ReplicatedStorage.Anima.Cutscenes.Player_lvti)
+
 local player = CutscenePlayer.new(cutscene, {
-    resolver = function(name)          -- 逻辑名 → 真实实例
-        if name == "Player" then return localCharacter end
-        return workspace:FindFirstChild(name, true)
-    end,
-    camera = workspace.CurrentCamera,
-    onEvent = function(event, target) ... end,
+	resolver = function(name)
+		if name == "Player" then
+			return localPlayer.Character
+		end
+		return workspace:FindFirstChild(name, true)
+	end,
+	camera = workspace.CurrentCamera,
+	forgeVfxModule = ReplicatedStorage:FindFirstChild("ForgeVFX"), -- forge cue 必需
+	onEvent = function(ev) end,
 })
 player:play(function() print("done") end)
 ```
 
-在 Studio 里可调 `_G.AnimaPlayBossIntro()` 手动触发示例过场。
+**Forge 特效**：place 内放置 [forge-vfx Releases](https://github.com/zilibobi/forge-vfx/releases) 的 **`ForgeVFX`** ModuleScript；特效 cue 设 `emitMode = "forge"`，`forgeRoot` 留空表示对整包绑定 emit。
+
+**Studio 试播**：同步 `AnimaBootstrap` 后 F5，Output 见 `[anima] 进游戏按 V 播放 Player_lvti`，或 `_G.AnimaPlayPlayerLvTi()`。
+
+---
+
+## 相机轨透视编辑（视口 A）
+
+选中 **camera 轨** 时主视口 WASD 构图；跟随绑定与相对关键帧见 [.claude/cmr/05-camera-authoring-spec.md](./.claude/cmr/05-camera-authoring-spec.md)、[06-camera-follow-binding-spec.md](./.claude/cmr/06-camera-follow-binding-spec.md)。
+
+---
 
 ## 状态
 
-- ✅ 阶段一:骨架 + 数据契约 + 运行时播放器 + 手写 boss_intro(已构建通过)
-- ⬜ 待 Studio 验证:装扮跟随 + 整条链路(走 roblox-studio MCP)
-- ⬜ 阶段二:Studio 插件时间轴 UI + 关键帧采集
+- ✅ 运行时 + 插件 Timeline M0（含 Forge 特效轨、音效轨、导出、草稿）
+- ✅ `Player_lvti` + Bootstrap **V 键** 联调路径
+- ⬜ B2 主工程 `showhand-template` 默认尚未挂载 Anima Runtime（规格见 [template/anima](https://github.com/showhand-org/template/tree/main/anima)）

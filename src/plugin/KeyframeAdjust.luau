@@ -12,6 +12,8 @@ local RunService = game:GetService("RunService")
 local Fusion = require(script.Parent.Packages.Fusion)
 local EditorState = require(script.Parent.EditorState)
 local CutsceneFormat = require(script.Parent.Shared.CutsceneFormat)
+local FollowAnchor = require(script.Parent.Shared.FollowAnchor)
+local SceneResolver = require(script.Parent.SceneResolver)
 
 local KeyframeAdjust = {}
 KeyframeAdjust.__index = KeyframeAdjust
@@ -81,9 +83,12 @@ function KeyframeAdjust.start(
 	end
 	self.state:pushUndo() -- 整段调整一步撤销
 	self.state:setTime(kf.t) -- 播放头定位到该帧
-	cam.CFrame = kf.value -- 跳进该帧视角
+	local viewCf = if track.kind == "camera"
+		then FollowAnchor.worldFromKeyframeCFrame(track, kf.value, SceneResolver.resolve)
+		else kf.value
+	cam.CFrame = viewCf -- 跳进该帧视角
 	self._track = track
-	self._lastCF = kf.value
+	self._lastCF = viewCf
 	self._dirty = false
 	self._lastCommit = os.clock()
 	self.current:set(kf)
@@ -99,7 +104,12 @@ function KeyframeAdjust.start(
 		local cf = c.CFrame
 		if moved(self._lastCF, cf) then
 			self._lastCF = cf
-			kf.value = cf
+			local track = self._track
+			if track and track.kind == "camera" then
+				kf.value = FollowAnchor.storeKeyframeCFrame(track, cf, SceneResolver.resolve)
+			else
+				kf.value = cf
+			end
 			self._dirty = true
 		end
 		if self._dirty and os.clock() - self._lastCommit >= COMMIT_INTERVAL then

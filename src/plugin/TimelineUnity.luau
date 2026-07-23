@@ -14,6 +14,8 @@ local DEFAULT_TRACK_NAME: { [string]: string } = {
 	camera = "相机轨道",
 	cameraMove = "相机运动轨道",
 	event = "标记轨道",
+	sound = "音效轨道",
+	effect = "特效轨道",
 }
 
 -- Unity 轨道类型徽标(字母块,替代 emoji)
@@ -23,6 +25,8 @@ local TRACK_BADGE: { [string]: string } = {
 	camera = "V",
 	cameraMove = "M",
 	event = "•",
+	sound = "S",
+	effect = "F",
 }
 
 function TimelineUnity.defaultTrackName(kind: TrackKind): string
@@ -43,7 +47,14 @@ end
 
 -- 左列:第二行 = Binding / 虚拟相机(对标 Unity 绑定槽)
 function TimelineUnity.trackBindingLine(track: CutsceneFormat.Track): string
-	if track.kind == "camera" or track.kind == "cameraMove" then
+	if track.kind == "camera" then
+		local line = "虚拟相机 · " .. track.target
+		if track.followBinding and track.followBinding ~= "" then
+			line ..= " · 跟随 " .. track.followBinding
+		end
+		return line
+	end
+	if track.kind == "cameraMove" then
 		return "虚拟相机 · " .. track.target
 	end
 	if track.kind == "event" then
@@ -61,9 +72,18 @@ function TimelineUnity.clipPrimaryTitle(track: CutsceneFormat.Track, clipIndex: 
 	return base
 end
 
-function TimelineUnity.clipSecondaryLine(clip: CutsceneFormat.AnimationClip): string
+function TimelineUnity.clipSecondaryLine(clip: CutsceneFormat.AnimationClip, fps: number?): string
 	local id = clip.animationId:match("(%d+)$") or clip.animationId
 	local parts: { string } = {}
+	if clip.rigType == "R6" or clip.rigType == "R15" then
+		table.insert(parts, `[{clip.rigType}]`)
+	end
+	if clip.endAt then
+		local f = math.max(fps or 30, 1)
+		local a = math.round(clip.startAt * f)
+		local b = math.round(clip.endAt * f)
+		table.insert(parts, string.format("%df-%df", a, b))
+	end
 	if clip.looped then
 		table.insert(parts, "循环")
 	end

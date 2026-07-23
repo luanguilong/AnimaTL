@@ -21,6 +21,8 @@ local CharacterBinder = require(script.Parent.CharacterBinder)
 local CameraTrack = require(script.Parent.CameraTrack)
 local TransformTrack = require(script.Parent.TransformTrack)
 local EventTrack = require(script.Parent.EventTrack)
+local SoundTrack = require(script.Parent.SoundTrack)
+local EffectTrack = require(script.Parent.EffectTrack)
 
 local CutscenePlayer = {}
 CutscenePlayer.__index = CutscenePlayer
@@ -29,6 +31,9 @@ export type Config = {
 	resolver: CutsceneFormat.BindingResolver,
 	camera: Camera?, -- 缺省用 workspace.CurrentCamera
 	onEvent: EventTrack.EventHandler?, -- 事件处理器;缺省仅打印
+	onSoundCue: SoundTrack.SoundCueHandler?,
+	onEffectCue: EffectTrack.EffectCueHandler?,
+	forgeVfxModule: ModuleScript?, -- 16: forge cue 默认 handler 用(例 ReplicatedStorage.ForgeVFX)
 }
 
 -- 单条动画片段的运行时状态
@@ -36,6 +41,7 @@ type ClipState = {
 	clip: CutsceneFormat.AnimationClip,
 	binder: CharacterBinder.CharacterBinder,
 	started: boolean,
+	ended: boolean,
 }
 
 export type CutscenePlayer = typeof(setmetatable(
@@ -46,6 +52,8 @@ export type CutscenePlayer = typeof(setmetatable(
 		_cameraTracks: { CameraTrack.CameraTrack },
 		_transformTracks: { TransformTrack.TransformTrack },
 		_eventTracks: { EventTrack.EventTrack },
+		_soundTracks: { SoundTrack.SoundTrack },
+		_effectTracks: { EffectTrack.EffectTrack },
 		_clips: { ClipState },
 		_binders: { [Model]: CharacterBinder.CharacterBinder },
 		_conn: RBXScriptConnection?,
@@ -70,6 +78,8 @@ function CutscenePlayer.new(cutscene: CutsceneFormat.Cutscene, config: Config): 
 		_cameraTracks = {},
 		_transformTracks = {},
 		_eventTracks = {},
+		_soundTracks = {},
+		_effectTracks = {},
 		_clips = {},
 		_binders = {},
 		_conn = nil,
@@ -95,7 +105,7 @@ function CutscenePlayer.new(cutscene: CutsceneFormat.Cutscene, config: Config): 
 	for _, track in cutscene.tracks do
 		if track.kind == "camera" then
 			if not cameraBuilt then
-				table.insert(self._cameraTracks, CameraTrack.new(cutscene, camera))
+				table.insert(self._cameraTracks, CameraTrack.new(cutscene, camera, config.resolver))
 				cameraBuilt = true
 			end
 		elseif track.kind == "transform" then
@@ -108,14 +118,30 @@ function CutscenePlayer.new(cutscene: CutsceneFormat.Cutscene, config: Config): 
 		elseif track.kind == "event" then
 			local target = config.resolver(track.target)
 			table.insert(self._eventTracks, EventTrack.new(track, target, self.onEvent))
+		elseif track.kind == "sound" then
+			local target = config.resolver(track.target)
+			table.insert(
+				self._soundTracks,
+				SoundTrack.new(track, target, config.onSoundCue)
+			)
+		elseif track.kind == "effect" then
+			local target = config.resolver(track.target)
+			table.insert(
+				self._effectTracks,
+				EffectTrack.new(track, target, config.onEffectCue, config.forgeVfxModule)
+			)
 		elseif track.kind == "animation" then
 			local target = config.resolver(track.target)
 			if target and target:IsA("Model") and track.clips then
+				local hum = target:FindFirstChildOfClass("Humanoid")
 				local binder = binderFor(target)
-				if binder then
-					for _, clip in track.clips do
-						table.insert(self._clips, { clip = clip, binder = binder, started = false })
+				if binder and hum then
+					local filtered = CutsceneFormat.clipsForRig(track.clips, hum.RigType)
+					for _, clip in filtered do
+						table.insert(self._clips, { clip = clip, binder = binder, started = false, ended = false })
 					end
+				elseif binder and not hum then
+					warn(`[anima] animation 轨道目标 '{track.target}' 没有 Humanoid,跳过 clips`)
 				end
 			else
 				warn(`[anima] animation 轨道目标 '{track.target}' 不是有效角色 Model`)
@@ -138,10 +164,20 @@ function CutscenePlayer._step(self: CutscenePlayer, t: number)
 	for _, et in self._eventTracks do
 		et:update(t)
 	end
+	for _, st in self._soundTracks do
+		st:update(t)
+	end
+	for _, ft in self._effectTracks do
+		ft:update(t)
+	end
 	for _, cs in self._clips do
 		if not cs.started and t >= cs.clip.startAt then
 			cs.started = true
 			cs.binder:playClip(cs.clip)
+		end
+		if cs.started and not cs.ended and cs.clip.endAt and t > cs.clip.endAt and cs.clip.looped ~= true then
+			cs.ended = true
+			cs.binder:stopClip(cs.clip.animationId, cs.clip.fadeTime)
 		end
 	end
 end
@@ -195,6 +231,12 @@ function CutscenePlayer.stop(self: CutscenePlayer)
 	end
 	for _, binder in self._binders do
 		binder:stopAll()
+	end
+	for _, st in self._soundTracks do
+		st:stop()
+	end
+	for _, ft in self._effectTracks do
+		ft:stop()
 	end
 end
 

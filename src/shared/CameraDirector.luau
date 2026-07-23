@@ -9,11 +9,36 @@
 local Sampler = require(script.Parent.Sampler)
 local VCamPose = require(script.Parent.VCamPose)
 local CutsceneFormat = require(script.Parent.CutsceneFormat)
+local FollowAnchor = require(script.Parent.FollowAnchor)
 
 local CameraDirector = {}
 
+-- 单条 camera 轨在 t 的世界位姿(不比较轨层级;段外返回 nil)。
+function CameraDirector.poseForCameraTrack(
+	cutscene: CutsceneFormat.Cutscene,
+	tr: CutsceneFormat.Track,
+	t: number,
+	resolveBinding: CutsceneFormat.BindingResolver?
+): CFrame?
+	if tr.kind ~= "camera" or not CutsceneFormat.coversAt(tr, t) then
+		return nil
+	end
+	if tr.keyframes and #tr.keyframes > 0 then
+		local stored = Sampler.sampleTrackCFrame(tr, t)
+		if stored and resolveBinding then
+			return FollowAnchor.worldFromKeyframeCFrame(tr, stored, resolveBinding)
+		end
+		return stored
+	end
+	return VCamPose.at(cutscene, tr.target, t)
+end
+
 -- 返回 (相机 CFrame, 上镜相机名)。找不到返回 (nil, nil)。
-function CameraDirector.evaluate(cutscene: CutsceneFormat.Cutscene, t: number): (CFrame?, string?)
+function CameraDirector.evaluate(
+	cutscene: CutsceneFormat.Cutscene,
+	t: number,
+	resolveBinding: CutsceneFormat.BindingResolver?
+): (CFrame?, string?)
 	-- 1) 覆盖 t 的独立相机轨(落在任一生效段内),层级最高(索引最小)那条
 	local best: CutsceneFormat.Track? = nil
 	local bestIdx: number? = nil
@@ -25,8 +50,9 @@ function CameraDirector.evaluate(cutscene: CutsceneFormat.Cutscene, t: number): 
 		end
 	end
 	if best then
-		if best.keyframes and #best.keyframes > 0 then
-			return Sampler.sampleCFrame(best.keyframes, t, best.smooth), best.target
+		local cf = CameraDirector.poseForCameraTrack(cutscene, best, t, resolveBinding)
+		if cf then
+			return cf, best.target
 		end
 		return VCamPose.at(cutscene, best.target, t), best.target
 	end
@@ -39,7 +65,11 @@ function CameraDirector.evaluate(cutscene: CutsceneFormat.Cutscene, t: number): 
 			and tr.keyframes
 			and #tr.keyframes > 0
 		then
-			return Sampler.sampleCFrame(tr.keyframes, t), nil
+			local stored = Sampler.sampleCFrame(tr.keyframes, t)
+			if stored and resolveBinding then
+				return FollowAnchor.worldFromKeyframeCFrame(tr, stored, resolveBinding), nil
+			end
+			return stored, nil
 		end
 	end
 

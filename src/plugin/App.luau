@@ -3,15 +3,17 @@
 -- 结构:顶部工具条 / 内嵌预览横条(可折叠) / vcam 管理条 / 左轨道名列 / 右时间轴。
 --
 -- 交互(时间轴内统一长按拖拽:按住 HOLD_SEC 后跟随;全程须按住左键,松开即放下;Alt=自由不吸附):
---   相机段块 / 端把手(3/5) — 拖头尾改 from/to、拖身体整体平移,点击选中该轨
+--   相机段块 — 中间长按整段平移;左右缘长按改 from/to;松手 finishCameraSegmentDrag;短按中间选中
 --   关键帧/片段/事件(6) — 拖改时间,右键菜单
 --   播放头(10) + 标尺(11) — 仅标尺行拖/长按 scrub;红线纯点击不跳
 --   轨道空白 — 点击取消选中,不移动播放头
---   关键帧/片段/事件 — 点击不跳播放头(定位见右键菜单)
+--   关键帧/片段/事件 — 点击不跳播放头(定位见右键菜单);相机类关键帧双击菱形=播放头+主视口跳转
 -- 时间轴内容套横向 ScrollingFrame,宽度=zoom×视口(右下角缩放按钮);时间按帧(fps)显示与吸附。
 -- 数据编辑直接调 EditorState(含撤销栈);vcam / 相机等 DataModel 副作用走回调。
 
 local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Selection = game:GetService("Selection")
 
 local Fusion = require(script.Parent.Packages.Fusion)
 local Theme = require(script.Parent.Theme)
@@ -22,6 +24,9 @@ local InputPrompt = require(script.Parent.InputPrompt)
 local CutsceneFormat = require(script.Parent.Shared.CutsceneFormat)
 local VCam = require(script.Parent.Shared.VCam)
 local TimelineUnity = require(script.Parent.TimelineUnity)
+local OverlayHost = require(script.Parent.OverlayHost)
+local BindingDrop = require(script.Parent.BindingDrop)
+local BindingFromInstance = require(script.Parent.BindingFromInstance)
 
 local New = Fusion.New
 local Children = Fusion.Children
@@ -30,15 +35,23 @@ local Computed = Fusion.Computed
 
 local SNAP_PX = 8 -- 吸附像素阈值
 local HOLD_SEC = 0.1 -- 时间轴:按住满此时长后进入拖拽;拖动全程须保持按住,松开即放下
+local SEGMENT_EDGE_PX = 10 -- 蓝条左右改长度热区(像素)
+local SEGMENT_EDGE_BAR_PX = 3 -- 缘上可见竖条宽(原 6,减半)
 
 -- 正在拖动播放头(scrub)时为 true,供把手时间提示条显示
 local playheadScrubbing = Fusion.Value(false)
 local playheadHandleHover = Fusion.Value(false)
 
-local function beginTimelineDrag(gui: PluginGui, handlers: DragController.Handlers, feedback: GuiObject?)
+local function beginTimelineDrag(
+	gui: PluginGui,
+	handlers: DragController.Handlers,
+	feedback: GuiObject?,
+	pressInput: InputObject?
+)
 	handlers.holdTime = HOLD_SEC
 	handlers.holdDrag = true
 	handlers.feedbackElement = feedback
+	handlers.pressInput = pressInput
 	if feedback and not handlers.pressSource then
 		handlers.pressSource = feedback
 	end
@@ -47,6 +60,15 @@ end
 
 -- 轨道名双击重命名(两次点击间隔 < 0.35s)
 local renameDbl: { track: CutsceneFormat.Track?, at: number } = { track = nil, at = 0 }
+
+-- 相机类关键帧菱形:双击跳转视口(间隔 < 0.35s,与轨道重命名一致)
+local kfJumpDbl: {
+	track: CutsceneFormat.Track?,
+	kf: CutsceneFormat.Keyframe?,
+	at: number,
+} = { track = nil, kf = nil, at = 0 }
+
+local CAMERA_CREATE_HINT = "🎥 相机轨请用顶栏「＋ 相机」"
 
 local function onTrackTitleClick(
 	gui: PluginGui,
@@ -89,7 +111,11 @@ export type Callbacks = {
 	onToggleMainPreview: () -> (),
 	onAddVcam: () -> (),
 	onLookThrough: () -> (),
-	onExport: () -> (),
+	onExport: (gui: PluginGui) -> (),
+	onNewDocument: () -> (),
+	onRestoreDraft: () -> (),
+	onImportMenu: (gui: PluginGui) -> (),
+	onSaveAsModule: (gui: PluginGui) -> (),
 	mountPreview: (container: Instance) -> (),
 	-- vcam / 场景相关副作用
 	onSelectVcam: (name: string) -> (),
@@ -100,15 +126,20 @@ export type Callbacks = {
 	onRecaptureVcam: (name: string) -> (),
 	onCaptureTransform: (track: CutsceneFormat.Track, t: number?) -> (),
 	onCaptureCameraMove: (track: CutsceneFormat.Track, t: number?) -> (),
+	onCaptureCameraTrack: (track: CutsceneFormat.Track, t: number?) -> (),
+	onCaptureAtPlayhead: () -> (), -- 顶栏/快捷键 K:当前选中 camera 轨
+	authoringMode: Fusion.Value<boolean>,
 	recordingCam: Fusion.Value<string?>, -- 正在录制的相机轨 target(nil=无)
-	onAddCameraTrack: (group: string?) -> (),
 	onCameraRecord: (track: CutsceneFormat.Track) -> (),
+	-- 双击相机关键帧:播放头 + 主视口一次性跳到该帧位姿(非 KeyframeAdjust)
+	onJumpToCameraKeyframe: (track: CutsceneFormat.Track, kf: CutsceneFormat.Keyframe) -> (),
 	targetCandidates: () -> { string },
 	characterCandidates: () -> { string }, -- 动画轨用:带 Humanoid 骨骼的候选
 	-- 视口对帧调整(相机类关键帧反向编辑)
 	adjustingKf: Fusion.Value<CutsceneFormat.Keyframe?>, -- 正在调整的关键帧(nil=无)
 	onAdjustKeyframe: (track: CutsceneFormat.Track, kf: CutsceneFormat.Keyframe) -> (), -- 开/关
 	onStopAdjust: () -> (),
+	appendPathPreviewMenuItems: (gui: PluginGui, items: { ContextMenu.Item }) -> (),
 }
 
 local function e(class: string)
@@ -129,15 +160,19 @@ local function button(text: any, color: any, onClick: () -> ()): Instance
 	})
 end
 
+type SnapSkip = {
+	keyframe: CutsceneFormat.Keyframe?,
+	clip: CutsceneFormat.AnimationClip?,
+	event: CutsceneFormat.CutsceneEvent?,
+	segment: CutsceneFormat.CameraSegment?,
+}
+
+type SnapDragOpts = {
+	edgeMode: ("from" | "to")?,
+}
+
 -- 收集单轨上的时间点(供拖拽吸附);默认不含其它轨道。
-local function markTimesForTrack(
-	track: CutsceneFormat.Track,
-	skip: {
-		keyframe: CutsceneFormat.Keyframe?,
-		clip: CutsceneFormat.AnimationClip?,
-		event: CutsceneFormat.CutsceneEvent?,
-	}?
-): { number }
+local function markTimesForTrack(track: CutsceneFormat.Track, skip: SnapSkip?): { number }
 	local out: { number } = {}
 	if track.keyframes then
 		for _, kf in track.keyframes do
@@ -150,6 +185,9 @@ local function markTimesForTrack(
 		for _, c in track.clips do
 			if not (skip and skip.clip == c) then
 				table.insert(out, c.startAt)
+				if c.endAt then
+					table.insert(out, c.endAt)
+				end
 			end
 		end
 	end
@@ -160,29 +198,131 @@ local function markTimesForTrack(
 			end
 		end
 	end
+	if track.soundCues then
+		for _, c in track.soundCues do
+			table.insert(out, c.t)
+		end
+	end
+	if track.effectCues then
+		for _, c in track.effectCues do
+			table.insert(out, c.t)
+		end
+	end
 	if track.segments then
 		for _, s in track.segments do
-			table.insert(out, s.from)
-			table.insert(out, s.to)
+			if not (skip and skip.segment == s) then
+				table.insert(out, s.from)
+				table.insert(out, s.to)
+			end
 		end
 	end
 	return out
 end
 
+-- V2:按住 Shift 时合并其它轨时间候选(本轨仍走 skip)。
+local function markTimesOtherTracks(state: EditorState.EditorState, homeTrack: CutsceneFormat.Track): { number }
+	local out: { number } = {}
+	for _, tr in state.tracks:get() do
+		if tr ~= homeTrack then
+			local part = markTimesForTrack(tr, nil)
+			for _, t in part do
+				table.insert(out, t)
+			end
+		end
+	end
+	return out
+end
+
+-- 同轨头尾接龙:左缘优先邻居 end,右缘优先邻居 start(同距离胜整秒/播放头)。
+local function edgePriorityCandidates(track: CutsceneFormat.Track, skip: SnapSkip?, edgeMode: "from" | "to"): { number }
+	local out: { number } = {}
+	if edgeMode == "from" then
+		if track.clips then
+			for _, c in track.clips do
+				if not (skip and skip.clip == c) and c.endAt then
+					table.insert(out, c.endAt)
+				end
+			end
+		end
+		if track.segments then
+			for _, s in track.segments do
+				if not (skip and skip.segment == s) then
+					table.insert(out, s.to)
+				end
+			end
+		end
+	else
+		if track.clips then
+			for _, c in track.clips do
+				if not (skip and skip.clip == c) then
+					table.insert(out, c.startAt)
+				end
+			end
+		end
+		if track.segments then
+			for _, s in track.segments do
+				if not (skip and skip.segment == s) then
+					table.insert(out, s.from)
+				end
+			end
+		end
+	end
+	return out
+end
+
+local function snapCandidateTimes(
+	state: EditorState.EditorState,
+	track: CutsceneFormat.Track,
+	skip: SnapSkip?,
+	crossTrack: boolean
+): { number }
+	local out = markTimesForTrack(track, skip)
+	table.insert(out, state.currentTime:get())
+	if crossTrack then
+		local other = markTimesOtherTracks(state, track)
+		for _, t in other do
+			table.insert(out, t)
+		end
+	end
+	return out
+end
+
+local function modifierAltDown(): boolean
+	return UserInputService:IsKeyDown(Enum.KeyCode.LeftAlt) or UserInputService:IsKeyDown(Enum.KeyCode.RightAlt)
+end
+
+local function modifierShiftDown(): boolean
+	return UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+end
+
 -- 标尺 / 播放头把手:长按后跟随 scrub;纯点击不跳时间(onClick 可选)。
 -- grab=true 时记录按下点与播放头的时间差,拖动保持相对位置不跳(播放头把手用)。
+local function mouseInTimelineRuler(gui: PluginGui, timelineArea: GuiObject, mouse: Vector2): boolean
+	local areaTop = timelineArea.AbsolutePosition.Y - gui.AbsolutePosition.Y
+	local relY = mouse.Y - areaTop
+	return relY >= 0 and relY <= Theme.size.rulerHeight
+end
+
 local function beginScrub(
 	gui: PluginGui,
 	state: EditorState.EditorState,
 	area: GuiObject,
 	onClick: (() -> ())?,
 	grab: boolean?,
-	pressSource: GuiObject?
+	pressSource: GuiObject?,
+	pressInput: InputObject?
 )
 	local offset = 0
 	if grab then
 		local m = gui:GetRelativeMousePosition()
-		offset = DragController.fracInArea(area, m) * state.duration:get() - state.currentTime:get()
+		offset = DragController.fracInArea(area, m, gui) * state.duration:get() - state.currentTime:get()
+	end
+	local function applyScrub(mouse: Vector2)
+		if not mouseInTimelineRuler(gui, area, mouse) then
+			return
+		end
+		local dur = state.duration:get()
+		state:setTime(math.clamp(DragController.fracInArea(area, mouse, gui) * dur - offset, 0, dur))
 	end
 	beginTimelineDrag(
 		gui,
@@ -190,10 +330,7 @@ local function beginScrub(
 			onBegin = function()
 				playheadScrubbing:set(true)
 			end,
-			onMove = function(mouse)
-				local dur = state.duration:get()
-				state:setTime(math.clamp(DragController.fracInArea(area, mouse) * dur - offset, 0, dur))
-			end,
+			onMove = applyScrub,
 			onEnd = function()
 				playheadScrubbing:set(false)
 			end,
@@ -205,28 +342,31 @@ local function beginScrub(
 			end,
 			pressSource = pressSource,
 		},
-		pressSource
+		pressSource,
+		pressInput
 	)
 end
 
--- 先吸附本轨其它标记点,再量化到帧(1/fps);按住 Alt = 自由(不吸附/不量化)。
+-- 先磁吸(整秒 + 本轨标记 + 播放头;缘拖优先头尾接龙),再量化到帧(1/fps);Alt = 自由(不吸附/不量化);Shift = 跨轨候选(V2)。
 local function draggedTime(
+	gui: PluginGui,
 	state: EditorState.EditorState,
 	area: GuiObject,
 	mouse: Vector2,
 	offsetSec: number?,
 	track: CutsceneFormat.Track,
-	skip: {
-		keyframe: CutsceneFormat.Keyframe?,
-		clip: CutsceneFormat.AnimationClip?,
-		event: CutsceneFormat.CutsceneEvent?,
-	}?
+	skip: SnapSkip?,
+	snapOpts: SnapDragOpts?
 ): number
 	local dur = state.duration:get()
-	local t = math.clamp(DragController.fracInArea(area, mouse) * dur - (offsetSec or 0), 0, dur)
-	local alt = UserInputService:IsKeyDown(Enum.KeyCode.LeftAlt)
+	local t = math.clamp(DragController.fracInArea(area, mouse, gui) * dur - (offsetSec or 0), 0, dur)
+	local alt = modifierAltDown()
 	local thr = SNAP_PX / math.max(area.AbsoluteSize.X, 1) * dur
-	local snapped = DragController.snapTime(t, dur, markTimesForTrack(track, skip), thr, alt)
+	local candidates = snapCandidateTimes(state, track, skip, modifierShiftDown())
+	local priority = if snapOpts and snapOpts.edgeMode
+		then edgePriorityCandidates(track, skip, snapOpts.edgeMode)
+		else nil
+	local snapped = DragController.snapTime(t, dur, candidates, thr, alt, priority)
 	if not alt then
 		local fps = state.fps:get()
 		snapped = math.clamp(math.round(snapped * fps) / fps, 0, dur)
@@ -269,6 +409,65 @@ local function pickTarget(
 	ContextMenu.show(gui, items)
 end
 
+-- 相机 / cameraMove 路径菜单(轨道行、时间轴段条、空白处右键共用)。
+local function cameraPathMenuItems(
+	gui: PluginGui,
+	cb: Callbacks,
+	state: EditorState.EditorState,
+	track: CutsceneFormat.Track,
+	atTime: number?,
+	suffix: string
+): { ContextMenu.Item }
+	local items: { ContextMenu.Item } = {}
+	local isBezier = track.pathMode == "bezier"
+	table.insert(items, {
+		text = if isBezier then "✓ 贝塞尔曲线" else "贝塞尔曲线",
+		onClick = function()
+			if isBezier then
+				state:setTrackPathMode(track, "linear")
+			else
+				state:pushUndo()
+				track.pathMode = "bezier"
+				track.smooth = false
+				EditorState.fitTrackToBezierTangents(track, true)
+				state:commitTracks(true)
+			end
+		end,
+	})
+	if isBezier then
+		table.insert(items, {
+			text = "  重置切线(直线段)",
+			onClick = function()
+				state:resetTrackTangents(track)
+			end,
+		})
+		local playT = atTime or state.currentTime:get()
+		local _, rightAtPlay = EditorState.bracketKeyframeInterval(track, playT)
+		if rightAtPlay then
+			table.insert(items, {
+				text = "  在播放头插入路径关键帧" .. suffix,
+				onClick = function()
+					state:insertPathKeyframeAt(track, playT)
+				end,
+			})
+		end
+	end
+	table.insert(items, {
+		text = "  直线插值",
+		onClick = function()
+			state:setTrackPathMode(track, "linear")
+		end,
+	})
+	table.insert(items, {
+		text = "  平滑 Catmull-Rom(旧)",
+		onClick = function()
+			state:setTrackSmooth(track, true)
+		end,
+	})
+	cb.appendPathPreviewMenuItems(gui, items)
+	return items
+end
+
 -- 轨道右键菜单(左栏行 / 时间轴行共用):按类型的快捷操作 + 改名 / 换目标 / 删除。
 -- atTime:时间轴行右键时传入点击处对应的时间,创建项在该时间点生效;
 -- 不传(左栏行)则沿用当前播放头时间。
@@ -281,6 +480,12 @@ local function showTrackMenu(
 )
 	local suffix = if atTime then string.format(" @ %.2fs", atTime) else ""
 	local items: { ContextMenu.Item } = { { kind = "header", text = track.name or track.kind } }
+	if track.kind == "camera" or track.kind == "cameraMove" then
+		for _, pathItem in cameraPathMenuItems(gui, cb, state, track, atTime, suffix) do
+			table.insert(items, pathItem)
+		end
+		table.insert(items, { kind = "sep" })
+	end
 	if track.kind == "animation" then
 		table.insert(items, {
 			text = "＋ 动画片段…" .. suffix,
@@ -302,10 +507,64 @@ local function showTrackMenu(
 			onClick = function()
 				InputPrompt.show(gui, {
 					title = "事件名(供 onEvent 分发)",
-					placeholder = "如 sfx_door / vfx_dust",
+					placeholder = "如 cutscene_start / boss_reveal",
 					onSubmit = function(txt)
 						if txt ~= "" then
 							state:addEvent(track, txt, atTime)
+						end
+					end,
+				})
+			end,
+		})
+	elseif track.kind == "sound" then
+		table.insert(items, {
+			text = "＋ 音效…" .. suffix,
+			onClick = function()
+				InputPrompt.show(gui, {
+					title = "SoundId",
+					placeholder = "rbxassetid://…",
+					onSubmit = function(txt)
+						if txt ~= "" then
+							state:addSoundCue(track, txt, atTime)
+						end
+					end,
+				})
+			end,
+		})
+	elseif track.kind == "effect" then
+		table.insert(items, {
+			text = "＋ Forge 特效…" .. suffix,
+			onClick = function()
+				InputPrompt.show(gui, {
+					title = "forgeRoot(绑定下子 Model 名,留空=整绑定)",
+					placeholder = "如 Slash;留空 emit 整个绑定",
+					onSubmit = function(txt)
+						local root = if txt ~= "" then txt else nil
+						state:addEffectCue(track, nil, nil, atTime, "forge", root)
+					end,
+				})
+			end,
+		})
+		table.insert(items, {
+			text = "＋ 粒子特效…" .. suffix,
+			onClick = function()
+				InputPrompt.show(gui, {
+					title = "ParticleEmitter 模板名(目标下)",
+					placeholder = "如 DustEmitter;留空则用资源 id",
+					onSubmit = function(txt)
+						local name = if txt ~= "" then txt else nil
+						if name then
+							state:addEffectCue(track, name, nil, atTime)
+						else
+							InputPrompt.show(gui, {
+								title = "粒子 rbxassetid",
+								placeholder = "rbxassetid://…",
+								onSubmit = function(id)
+									if id ~= "" then
+										state:addEffectCue(track, nil, id, atTime)
+									end
+								end,
+							})
 						end
 					end,
 				})
@@ -325,6 +584,20 @@ local function showTrackMenu(
 			text = "采集相机位姿打帧" .. suffix,
 			onClick = function()
 				cb.onCaptureCameraMove(track, atTime)
+			end,
+		})
+	elseif track.kind == "camera" then
+		table.insert(items, {
+			text = "＋ 添加生效段（无关键帧）" .. suffix,
+			onClick = function()
+				local t = atTime or state.currentTime:get()
+				state:addSegment(track, t)
+			end,
+		})
+		table.insert(items, {
+			text = (if atTime then "在此处采集视口打帧" else "在此刻采集视口打帧") .. suffix,
+			onClick = function()
+				cb.onCaptureCameraTrack(track, atTime)
 			end,
 		})
 	end
@@ -374,9 +647,9 @@ local function showAddTrackMenu(
 )
 	local items: { ContextMenu.Item } = { { kind = "header", text = "添加轨道" } }
 	table.insert(items, {
-		text = "相机轨道",
+		text = CAMERA_CREATE_HINT,
 		onClick = function()
-			cb.onAddCameraTrack(nil)
+			print("[anima] 请使用顶栏「＋ 相机」创建虚拟相机与独立相机轨")
 		end,
 	})
 	table.insert(items, {
@@ -401,14 +674,22 @@ local function showAddTrackMenu(
 			state:addTrack("event", "Player", TimelineUnity.defaultTrackName("event"))
 		end,
 	})
-	for _, vn in VCam.list() do
-		table.insert(items, {
-			text = "相机运动 → " .. vn,
-			onClick = function()
-				state:addTrack("cameraMove", vn, TimelineUnity.defaultTrackName("cameraMove"), nil)
-			end,
-		})
-	end
+	table.insert(items, {
+		text = "音效轨道 → 选择绑定…",
+		onClick = function()
+			pickTarget(gui, "绑定发声位置", cb.targetCandidates(), function(tgt)
+				state:addTrack("sound", tgt, TimelineUnity.defaultTrackName("sound"))
+			end)
+		end,
+	})
+	table.insert(items, {
+		text = "特效轨道 → 选择绑定…",
+		onClick = function()
+			pickTarget(gui, "绑定特效挂点", cb.targetCandidates(), function(tgt)
+				state:addTrack("effect", tgt, TimelineUnity.defaultTrackName("effect"))
+			end)
+		end,
+	})
 	table.insert(items, { kind = "sep" })
 	table.insert(items, {
 		text = "轨道组…",
@@ -433,8 +714,61 @@ local function topbar(
 		local fps = state.fps:get()
 		local cur = math.round(state.currentTime:get() * fps)
 		local total = math.round(state.duration:get() * fps)
-		return string.format("帧 %d / %d", cur, total)
+		return string.format("帧 %d/%d · %.2fs", cur, total, state.duration:get())
 	end)
+
+	local function showDurationMenu()
+		local fps = math.max(state.fps:get(), 1)
+		local totalFrames = math.round(state.duration:get() * fps)
+		ContextMenu.show(gui, {
+			{ kind = "header", text = "过场总时长" },
+			{
+				text = "改总帧数…",
+				onClick = function()
+					InputPrompt.show(gui, {
+						title = string.format("总帧数(fps=%d)", math.floor(fps)),
+						placeholder = "如 120",
+						default = tostring(totalFrames),
+						onSubmit = function(txt)
+							local f = tonumber(txt)
+							if f and f >= 1 then
+								state:setTotalFrames(math.floor(f))
+							end
+						end,
+					})
+				end,
+			},
+			{
+				text = "改总时长(秒)…",
+				onClick = function()
+					InputPrompt.show(gui, {
+						title = "总时长(秒)",
+						placeholder = "如 5 / 8.5",
+						default = string.format("%.2f", state.duration:get()),
+						onSubmit = function(txt)
+							local n = tonumber(txt)
+							if n and n > 0 then
+								state:setDuration(n)
+							end
+						end,
+					})
+				end,
+			},
+			{ kind = "sep" },
+			{
+				text = "时长适应全部内容",
+				onClick = function()
+					state:fitDurationToContent(false)
+				end,
+			},
+			{
+				text = "时长适应选中轨",
+				onClick = function()
+					state:fitDurationToContent(true)
+				end,
+			},
+		}, { width = 220 })
+	end
 	local playText = Computed(function()
 		return if cb.isPlaying:get() then "⏸" else "▶"
 	end)
@@ -461,6 +795,17 @@ local function topbar(
 	end)
 	local recColor = Computed(function()
 		return if cb.recordActive:get() then Theme.color.danger else Color3.fromRGB(96, 48, 52)
+	end)
+	local captureKEnabled = Computed(function()
+		local idx = state.selectedTrack:get()
+		if not idx then
+			return false
+		end
+		local tr = state.tracks:get()[idx]
+		return tr ~= nil and (tr.kind == "camera" or tr.kind == "cameraMove")
+	end)
+	local captureKColor = Computed(function()
+		return if captureKEnabled:get() then Theme.color.track.camera else Theme.color.bg
 	end)
 
 	local function slot(order: number, width: number, child: Instance): Instance
@@ -499,31 +844,21 @@ local function topbar(
 			e("TextButton")({
 				LayoutOrder = 2,
 				BackgroundTransparency = 1,
-				Size = UDim2.new(0, 92, 1, 0),
+				Size = UDim2.new(0, 128, 1, 0),
 				Text = timeLabel,
-				TextColor3 = Theme.color.textDim,
+				TextColor3 = Theme.color.text,
 				Font = Theme.font.main,
-				TextSize = 13,
+				TextSize = 12,
 				AutoButtonColor = false,
-				-- 点击改总时长(当前 / 总)
 				[OnEvent("Activated")] = function()
-					InputPrompt.show(gui, {
-						title = "总时长(秒)",
-						placeholder = "如 5 / 8.5",
-						default = string.format("%.2f", state.duration:get()),
-						onSubmit = function(txt)
-							local n = tonumber(txt)
-							if n and n > 0 then
-								state:setDuration(n)
-							end
-						end,
-					})
+					showDurationMenu()
 				end,
 			}),
 			slot(3, 32, button("⏮", Theme.color.panel, cb.onToStart)),
 			slot(5, 36, button("🔁", loopColor, cb.onToggleLoop)),
 			slot(4, 40, button(playText, Theme.color.accent, cb.onPlayPause)),
 			slot(4, 70, button(recText, recColor, cb.onToggleRecord)),
+			slot(13, 56, button("打帧 K", captureKColor, cb.onCaptureAtPlayhead)),
 			slot(
 				6,
 				34,
@@ -548,7 +883,17 @@ local function topbar(
 					previewCollapsed:set(not previewCollapsed:get())
 				end)
 			),
-			slot(12, 60, button("💾 导出", Theme.color.track.animation, cb.onExport)),
+			slot(14, 44, button("📄 新建", Theme.color.panelAlt, cb.onNewDocument)),
+			slot(15, 44, button("📂 导入", Theme.color.panelAlt, function()
+				cb.onImportMenu(gui)
+			end)),
+			slot(16, 48, button("📁 另存", Theme.color.panelAlt, function()
+				cb.onSaveAsModule(gui)
+			end)),
+			slot(17, 52, button("↺ 草稿", Theme.color.panelAlt, cb.onRestoreDraft)),
+			slot(18, 60, button("💾 导出", Theme.color.track.animation, function()
+				cb.onExport(gui)
+			end)),
 		},
 	})
 end
@@ -734,7 +1079,7 @@ local function markDiamond(
 		ZIndex = 6,
 		[OnEvent("InputBegan")] = function(input: InputObject)
 			if input.UserInputType == Enum.UserInputType.MouseButton1 then
-				local grab = DragController.fracInArea(area(), gui:GetRelativeMousePosition())
+				local grab = DragController.fracInArea(area(), gui:GetRelativeMousePosition(), gui)
 						* state.duration:get()
 					- kf.t
 				beginTimelineDrag(gui, {
@@ -742,13 +1087,35 @@ local function markDiamond(
 						state:pushUndo()
 					end,
 					onMove = function(mouse)
-						kf.t = draggedTime(state, area(), mouse, grab, track, { keyframe = kf })
+						kf.t = draggedTime(gui, state, area(), mouse, grab, track, { keyframe = kf })
 						diamond.Position = UDim2.fromScale(kf.t / state.duration:get(), 0.5)
 					end,
 					onEnd = function()
 						state:finishDrag()
 					end,
-				}, diamond)
+					onClick = function()
+						if track.kind ~= "camera" and track.kind ~= "cameraMove" then
+							return
+						end
+						local cf = kf.value
+						if typeof(cf) ~= "CFrame" then
+							return
+						end
+						local now = os.clock()
+						if
+							kfJumpDbl.kf == kf
+							and kfJumpDbl.track == track
+							and now - kfJumpDbl.at < 0.35
+						then
+							kfJumpDbl.kf = nil
+							cb.onJumpToCameraKeyframe(track, kf)
+						else
+							kfJumpDbl.track = track
+							kfJumpDbl.kf = kf
+							kfJumpDbl.at = now
+						end
+					end,
+				}, diamond, input)
 			elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
 				local items: { ContextMenu.Item } = {
 					{ kind = "header", text = string.format("关键帧 @ %.2fs", kf.t) },
@@ -788,6 +1155,24 @@ local function markDiamond(
 							cb.onAdjustKeyframe(track, kf)
 						end,
 					})
+					if track.pathMode == "bezier" and track.keyframes then
+						for i, k in track.keyframes do
+							if k == kf and track.keyframes[i + 1] then
+								local nextKf = track.keyframes[i + 1]
+								table.insert(items, {
+									text = string.format(
+										"在 %.2f–%.2fs 段中插入关键帧",
+										kf.t,
+										nextKf.t
+									),
+									onClick = function()
+										state:insertPathKeyframeMidpoint(track, kf, nextKf)
+									end,
+								})
+								break
+							end
+						end
+					end
 				end
 				table.insert(items, {
 					text = "复制(+0.5s)",
@@ -820,7 +1205,7 @@ local function markDiamond(
 	return diamond
 end
 
--- 动画 Clip 条(对标 Unity Animation Track clip)。
+-- 动画 Clip 条:中间平移;左右缘改 startAt/endAt;录入 id 后自动匹配源时长。
 local function clipBlock(
 	gui: PluginGui,
 	state: EditorState.EditorState,
@@ -830,37 +1215,141 @@ local function clipBlock(
 	clipIndex: number,
 	nextT: number
 ): Instance
-	local dur = state.duration:get()
-	local endT = math.min(nextT, math.max(clip.startAt + 1.5, clip.startAt))
-	local w = math.max((endT - clip.startAt) / dur, 0.02)
-	local primary = TimelineUnity.clipPrimaryTitle(track, clipIndex)
-	local secondary = TimelineUnity.clipSecondaryLine(clip)
+	local function minClipDur(): number
+		return 1 / math.max(state.fps:get(), 1)
+	end
+
+	local function clipEndVisual(d: number): number
+		return CutsceneFormat.clipTimelineEnd(clip, nextT, nil)
+	end
+
 	local block
+	local function refresh()
+		local d = state.duration:get()
+		local endT = clipEndVisual(d)
+		block.Position = UDim2.new(clip.startAt / d, 1, 0, 4)
+		block.Size = UDim2.new(math.max((endT - clip.startAt) / d, 0.02), -2, 1, -8)
+		local lbl = block:FindFirstChild("ClipLabel")
+		if lbl and lbl:IsA("TextLabel") then
+			local primary = TimelineUnity.clipPrimaryTitle(track, clipIndex)
+			local secondary = TimelineUnity.clipSecondaryLine(clip, state.fps:get())
+			lbl.Text = primary .. "\n" .. secondary
+		end
+	end
+
+	local function beginClipEdgeDrag(mode: "from" | "to", pressInput: InputObject, feedback: GuiObject)
+		local grab = DragController.fracInArea(area(), gui:GetRelativeMousePosition(), gui) * state.duration:get()
+			- (if mode == "from" then clip.startAt else (clip.endAt or clip.startAt + 1.5))
+		local snapStart, snapEnd = clip.startAt, clip.endAt
+		beginTimelineDrag(gui, {
+			onBegin = function()
+				snapStart, snapEnd = clip.startAt, clip.endAt
+				state:pushUndo()
+			end,
+			onMove = function(mouse)
+				local t = draggedTime(gui, state, area(), mouse, grab, track, { clip = clip }, { edgeMode = mode })
+				local minLen = minClipDur()
+				if mode == "from" then
+					local endFix = clip.endAt or clip.startAt + 1.5
+					clip.startAt = math.min(t, endFix - minLen)
+				else
+					clip.endAt = math.max(t, clip.startAt + minLen)
+				end
+				refresh()
+			end,
+			onEnd = function()
+				state:finishClipDrag(track)
+			end,
+			onCancel = function()
+				clip.startAt = snapStart
+				clip.endAt = snapEnd
+				refresh()
+			end,
+		}, feedback, pressInput)
+	end
+
+	local function beginClipBodyDrag(pressInput: InputObject)
+		local mouse = gui:GetRelativeMousePosition()
+		local blockLeft = block.AbsolutePosition.X
+		local relX = mouse.X - blockLeft
+		local w = math.max(block.AbsoluteSize.X, 1)
+		if relX < SEGMENT_EDGE_PX or relX > w - SEGMENT_EDGE_PX then
+			return
+		end
+		local grab = DragController.fracInArea(area(), mouse, gui) * state.duration:get() - clip.startAt
+		local len0 = (clip.endAt or clip.startAt + 1.5) - clip.startAt
+		local snapStart, snapEnd = clip.startAt, clip.endAt
+		beginTimelineDrag(gui, {
+			onBegin = function()
+				snapStart, snapEnd = clip.startAt, clip.endAt
+				state:pushUndo()
+			end,
+			onMove = function(moveMouse)
+				local dur = state.duration:get()
+				local newFrom = draggedTime(gui, state, area(), moveMouse, grab, track, { clip = clip }, { edgeMode = "from" })
+				newFrom = math.clamp(newFrom, 0, math.max(0, dur - len0))
+				clip.startAt = newFrom
+				clip.endAt = newFrom + len0
+				refresh()
+			end,
+			onEnd = function()
+				state:finishClipDrag(track)
+			end,
+			onClick = function() end,
+			onCancel = function()
+				clip.startAt = snapStart
+				clip.endAt = snapEnd
+				refresh()
+			end,
+		}, block, pressInput)
+	end
+
+	local function edgeHit(anchorX: number): Instance
+		local hitBtn: TextButton
+		hitBtn = e("TextButton")({
+			BackgroundTransparency = 1,
+			Text = "",
+			Size = UDim2.new(0, SEGMENT_EDGE_PX, 1, 0),
+			AnchorPoint = Vector2.new(anchorX, 0),
+			Position = UDim2.fromScale(anchorX, 0),
+			ZIndex = 10,
+			AutoButtonColor = false,
+			[OnEvent("InputBegan")] = function(input: InputObject)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 then
+					beginClipEdgeDrag(if anchorX == 0 then "from" else "to", input, hitBtn)
+				end
+			end,
+			[Children] = e("Frame")({
+				BackgroundColor3 = Theme.color.handle,
+				BackgroundTransparency = 0.25,
+				BorderSizePixel = 0,
+				Size = UDim2.new(0, SEGMENT_EDGE_BAR_PX, 1, 0),
+				AnchorPoint = Vector2.new(anchorX, 0),
+				Position = UDim2.fromScale(anchorX, 0),
+				ZIndex = 1,
+				Active = false,
+			}),
+		}) :: TextButton
+		return hitBtn
+	end
+
+	local dur = state.duration:get()
+	local endT0 = clipEndVisual(dur)
+	local w0 = math.max((endT0 - clip.startAt) / dur, 0.02)
+	local leftEdge = edgeHit(0)
+	local rightEdge = edgeHit(1)
 	block = e("TextButton")({
 		BackgroundColor3 = Theme.color.track.animation,
-		BackgroundTransparency = 0.12,
+		BackgroundTransparency = 0.08,
 		Position = UDim2.new(clip.startAt / dur, 1, 0, 4),
-		Size = UDim2.new(w, -2, 1, -8),
+		Size = UDim2.new(w0, -2, 1, -8),
 		Text = "",
-		AutoButtonColor = true,
+		AutoButtonColor = false,
 		ZIndex = 7,
 		[OnEvent("InputBegan")] = function(input: InputObject)
 			if input.UserInputType == Enum.UserInputType.MouseButton1 then
-				local grab = DragController.fracInArea(area(), gui:GetRelativeMousePosition())
-						* state.duration:get()
-					- clip.startAt
-				beginTimelineDrag(gui, {
-					onBegin = function()
-						state:pushUndo()
-					end,
-					onMove = function(mouse)
-						clip.startAt = draggedTime(state, area(), mouse, grab, track, { clip = clip })
-						block.Position = UDim2.new(clip.startAt / state.duration:get(), 1, 0, 4)
-					end,
-					onEnd = function()
-						state:finishDrag()
-					end,
-				}, block)
+				beginClipBodyDrag(input)
+				return
 			elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
 				ContextMenu.show(gui, {
 					{ kind = "header", text = "Animation Clip" },
@@ -881,8 +1370,31 @@ local function clipBlock(
 									local f = tonumber(txt)
 									if f then
 										state:pushUndo()
-										clip.startAt = math.clamp(f / fps, 0, state.duration:get())
-										state:finishDrag()
+										local len = (clip.endAt or clip.startAt + 1.5) - clip.startAt
+										clip.startAt = math.clamp(f / fps, 0, state.duration:get() - len)
+										if clip.endAt then
+											clip.endAt = clip.startAt + len
+										end
+										state:finishClipDrag(track)
+									end
+								end,
+							})
+						end,
+					},
+					{
+						text = "改结束帧…",
+						onClick = function()
+							local fps = state.fps:get()
+							local endV = clip.endAt or clip.startAt + 1.5
+							InputPrompt.show(gui, {
+								title = "结束时间(帧)",
+								default = tostring(math.round(endV * fps)),
+								onSubmit = function(txt)
+									local f = tonumber(txt)
+									if f then
+										state:pushUndo()
+										state:setClipEndAt(clip, f / fps)
+										state:finishClipDrag(track)
 									end
 								end,
 							})
@@ -894,13 +1406,20 @@ local function clipBlock(
 							InputPrompt.show(gui, {
 								title = "动画 AnimationId",
 								default = clip.animationId,
-								placeholder = "rbxassetid://…",
+								placeholder = "rbxassetid://… 或数字 id",
 								onSubmit = function(txt)
 									if txt ~= "" then
-										state:setClipField(clip, "animationId", txt)
+										state:applyClipAnimationId(track, clip, txt, nil)
 									end
 								end,
 							})
+						end,
+					},
+					{
+						text = "按动画时长重算条长",
+						onClick = function()
+							state:pushUndo()
+							state:syncClipLengthFromAsset(clip, track, nil)
 						end,
 					},
 					{
@@ -926,13 +1445,32 @@ local function clipBlock(
 					},
 					{ kind = "sep" },
 					{
+						text = "Rig：R6 专用",
+						onClick = function()
+							state:setClipField(clip, "rigType", "R6")
+						end,
+					},
+					{
+						text = "Rig：R15 专用",
+						onClick = function()
+							state:setClipField(clip, "rigType", "R15")
+						end,
+					},
+					{
+						text = "Rig：不限(清除)",
+						onClick = function()
+							state:setClipField(clip, "rigType", nil)
+						end,
+					},
+					{ kind = "sep" },
+					{
 						text = "删除片段",
 						color = Theme.color.danger,
 						onClick = function()
 							state:removeClip(track, clip)
 						end,
 					},
-				})
+				}, { width = 240 })
 			end
 		end,
 		[Children] = {
@@ -942,29 +1480,27 @@ local function clipBlock(
 				BackgroundTransparency = 0.35,
 				BorderSizePixel = 0,
 				Size = UDim2.new(0, 4, 1, 0),
+				Active = false,
 			}),
-			e("UIPadding")({ PaddingLeft = UDim.new(0, 8), PaddingTop = UDim.new(0, 2) }),
+			leftEdge,
+			rightEdge,
 			e("TextLabel")({
+				Name = "ClipLabel",
 				BackgroundTransparency = 1,
-				Position = UDim2.fromOffset(8, 2),
-				Size = UDim2.new(1, -10, 0, 14),
-				Text = primary,
-				TextColor3 = Theme.color.text,
+				Size = UDim2.fromScale(1, 1),
+				Text = TimelineUnity.clipPrimaryTitle(track, clipIndex)
+					.. "\n"
+					.. TimelineUnity.clipSecondaryLine(clip, state.fps:get()),
 				TextXAlignment = Enum.TextXAlignment.Left,
+				TextYAlignment = Enum.TextYAlignment.Top,
 				TextTruncate = Enum.TextTruncate.AtEnd,
+				ZIndex = 2,
+				TextColor3 = Theme.color.clipLabelText,
+				TextStrokeColor3 = Theme.color.clipLabelStroke,
+				TextStrokeTransparency = 0.35,
 				Font = Theme.font.bold,
 				TextSize = 11,
-			}),
-			e("TextLabel")({
-				BackgroundTransparency = 1,
-				Position = UDim2.fromOffset(8, 16),
-				Size = UDim2.new(1, -10, 0, 12),
-				Text = secondary,
-				TextColor3 = Theme.color.textDim,
-				TextXAlignment = Enum.TextXAlignment.Left,
-				TextTruncate = Enum.TextTruncate.AtEnd,
-				Font = Theme.font.main,
-				TextSize = 9,
+				[Children] = e("UIPadding")({ PaddingLeft = UDim.new(0, 8), PaddingTop = UDim.new(0, 2) }),
 			}),
 		},
 	})
@@ -999,7 +1535,7 @@ local function eventDiamond(
 		ZIndex = 6,
 		[OnEvent("InputBegan")] = function(input: InputObject)
 			if input.UserInputType == Enum.UserInputType.MouseButton1 then
-				local grab = DragController.fracInArea(area(), gui:GetRelativeMousePosition())
+				local grab = DragController.fracInArea(area(), gui:GetRelativeMousePosition(), gui)
 						* state.duration:get()
 					- ev.t
 				beginTimelineDrag(gui, {
@@ -1007,13 +1543,13 @@ local function eventDiamond(
 						state:pushUndo()
 					end,
 					onMove = function(mouse)
-						ev.t = draggedTime(state, area(), mouse, grab, track, { event = ev })
+						ev.t = draggedTime(gui, state, area(), mouse, grab, track, { event = ev })
 						container.Position = UDim2.fromScale(ev.t / state.duration:get(), 0.5)
 					end,
 					onEnd = function()
 						state:finishDrag()
 					end,
-				}, hitTarget)
+				}, hitTarget, input)
 			elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
 				ContextMenu.show(gui, {
 					{ kind = "header", text = "Marker · " .. ev.name },
@@ -1102,30 +1638,347 @@ local function eventDiamond(
 	return container
 end
 
--- 相机轨的一个生效段块(track.segments[segIndex]):长按拖动(两端 resize / 身体平移)、
--- 点击选中、右键(输入起止帧/加段/删段/删轨)。同一台相机可有多段,每段一个块。
-local function segmentBlock(
+local function soundCueMarker(
 	gui: PluginGui,
 	state: EditorState.EditorState,
 	area: () -> GuiObject,
 	track: CutsceneFormat.Track,
-	segIndex: number
+	cue: CutsceneFormat.SoundCue
+): Instance
+	local dur = state.duration:get()
+	local color = Theme.trackColor("sound")
+	local labelText = cue.soundId:match("(%d+)$") or cue.soundId
+	local container
+	local hitTarget
+	local markerLine = e("Frame")({
+		BackgroundColor3 = color,
+		BorderSizePixel = 0,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.new(0, 2, 1, 0),
+		ZIndex = 5,
+	})
+	hitTarget = e("TextButton")({
+		BackgroundTransparency = 1,
+		Size = UDim2.new(0, 16, 1, 0),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Text = "",
+		ZIndex = 6,
+		[OnEvent("InputBegan")] = function(input: InputObject)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				local grab = DragController.fracInArea(area(), gui:GetRelativeMousePosition(), gui)
+						* state.duration:get()
+					- cue.t
+				beginTimelineDrag(gui, {
+					onBegin = function()
+						state:pushUndo()
+					end,
+					onMove = function(mouse)
+						cue.t = draggedTime(gui, state, area(), mouse, grab, track, nil)
+						container.Position = UDim2.fromScale(cue.t / state.duration:get(), 0.5)
+					end,
+					onEnd = function()
+						state:finishDrag()
+					end,
+				}, hitTarget, input)
+			elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+				ContextMenu.show(gui, {
+					{ kind = "header", text = "音效 · " .. labelText },
+					{
+						text = "定位",
+						onClick = function()
+							state:setTime(cue.t)
+						end,
+					},
+					{
+						text = "改 SoundId…",
+						onClick = function()
+							InputPrompt.show(gui, {
+								title = "SoundId",
+								default = cue.soundId,
+								onSubmit = function(txt)
+									if txt ~= "" then
+										state:setSoundCueField(cue, "soundId", txt)
+									end
+								end,
+							})
+						end,
+					},
+					{
+						text = "改音量 volume…",
+						onClick = function()
+							InputPrompt.show(gui, {
+								title = "音量 0~1",
+								default = tostring(cue.volume or 1),
+								onSubmit = function(txt)
+									local n = tonumber(txt)
+									if n then
+										state:setSoundCueField(cue, "volume", math.clamp(n, 0, 1))
+									end
+								end,
+							})
+						end,
+					},
+					{ kind = "sep" },
+					{
+						text = "删除",
+						color = Theme.color.danger,
+						onClick = function()
+							state:removeSoundCue(track, cue)
+						end,
+					},
+				})
+			end
+		end,
+	})
+	local label = e("TextLabel")({
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.new(0.5, 4, 0, -2),
+		Size = UDim2.fromOffset(120, 14),
+		Text = "♪ " .. labelText,
+		TextColor3 = color,
+		Font = Theme.font.bold,
+		TextSize = 10,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		ZIndex = 7,
+	})
+	container = e("Frame")({
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(cue.t / dur, 0.5),
+		Size = UDim2.new(0, 130, 1, 0),
+		[Children] = { markerLine, hitTarget, label },
+	})
+	return container
+end
+
+local function effectCueMarker(
+	gui: PluginGui,
+	state: EditorState.EditorState,
+	area: () -> GuiObject,
+	track: CutsceneFormat.Track,
+	cue: CutsceneFormat.EffectCue
+): Instance
+	local dur = state.duration:get()
+	local color = Theme.trackColor("effect")
+	local labelText
+	if cue.emitMode == "forge" then
+		labelText = "forge:" .. (cue.forgeRoot or "*")
+	else
+		labelText = cue.templateName
+			or (cue.particleAssetId and (cue.particleAssetId:match("(%d+)$") or cue.particleAssetId))
+			or "fx"
+	end
+	local container
+	local hitTarget
+	local markerLine = e("Frame")({
+		BackgroundColor3 = color,
+		BorderSizePixel = 0,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Size = UDim2.new(0, 2, 1, 0),
+		ZIndex = 5,
+	})
+	hitTarget = e("TextButton")({
+		BackgroundTransparency = 1,
+		Size = UDim2.new(0, 16, 1, 0),
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(0.5, 0.5),
+		Text = "",
+		ZIndex = 6,
+		[OnEvent("InputBegan")] = function(input: InputObject)
+			if input.UserInputType == Enum.UserInputType.MouseButton1 then
+				local grab = DragController.fracInArea(area(), gui:GetRelativeMousePosition(), gui)
+						* state.duration:get()
+					- cue.t
+				beginTimelineDrag(gui, {
+					onBegin = function()
+						state:pushUndo()
+					end,
+					onMove = function(mouse)
+						cue.t = draggedTime(gui, state, area(), mouse, grab, track, nil)
+						container.Position = UDim2.fromScale(cue.t / state.duration:get(), 0.5)
+					end,
+					onEnd = function()
+						state:finishDrag()
+					end,
+				}, hitTarget, input)
+			elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
+				ContextMenu.show(gui, {
+					{ kind = "header", text = "特效 · " .. labelText },
+					{
+						text = "定位",
+						onClick = function()
+							state:setTime(cue.t)
+						end,
+					},
+					{
+						text = "Forge: 改 forgeRoot…",
+						onClick = function()
+							InputPrompt.show(gui, {
+								title = "forgeRoot(留空=整绑定)",
+								default = cue.forgeRoot or "",
+								onSubmit = function(txt)
+									state:setEffectCueField(cue, "forgeRoot", if txt ~= "" then txt else nil)
+									state:setEffectCueField(cue, "emitMode", "forge")
+								end,
+							})
+						end,
+					},
+					{
+						text = "Forge: 改 forgeScale…",
+						onClick = function()
+							InputPrompt.show(gui, {
+								title = "forgeScale",
+								default = tostring(cue.forgeScale or 1),
+								onSubmit = function(txt)
+									local n = tonumber(txt)
+									if n then
+										state:setEffectCueField(cue, "forgeScale", n)
+										state:setEffectCueField(cue, "emitMode", "forge")
+									end
+								end,
+							})
+						end,
+					},
+					{
+						text = "切换为 Forge 模式",
+						onClick = function()
+							state:setEffectCueField(cue, "emitMode", "forge")
+							state:setEffectCueField(cue, "templateName", nil)
+							state:setEffectCueField(cue, "particleAssetId", nil)
+						end,
+					},
+					{
+						text = "切换为粒子模式",
+						onClick = function()
+							state:setEffectCueField(cue, "emitMode", nil)
+							state:setEffectCueField(cue, "forgeRoot", nil)
+							state:setEffectCueField(cue, "forgeScale", nil)
+						end,
+					},
+					{
+						text = "改模板名 templateName…",
+						onClick = function()
+							InputPrompt.show(gui, {
+								title = "ParticleEmitter 名",
+								default = cue.templateName or "",
+								onSubmit = function(txt)
+									state:setEffectCueField(cue, "emitMode", nil)
+									state:setEffectCueField(cue, "templateName", if txt ~= "" then txt else nil)
+								end,
+							})
+						end,
+					},
+					{
+						text = "改粒子资源 id…",
+						onClick = function()
+							InputPrompt.show(gui, {
+								title = "particleAssetId",
+								default = cue.particleAssetId or "",
+								onSubmit = function(txt)
+									state:setEffectCueField(
+										cue,
+										"particleAssetId",
+										if txt ~= "" then txt else nil
+									)
+								end,
+							})
+						end,
+					},
+					{
+						text = "改 emitCount…",
+						onClick = function()
+							InputPrompt.show(gui, {
+								title = "Emit 数量",
+								default = tostring(cue.emitCount or 1),
+								onSubmit = function(txt)
+									local n = tonumber(txt)
+									if n then
+										state:setEffectCueField(cue, "emitCount", math.max(1, math.floor(n)))
+									end
+								end,
+							})
+						end,
+					},
+					{ kind = "sep" },
+					{
+						text = "删除",
+						color = Theme.color.danger,
+						onClick = function()
+							state:removeEffectCue(track, cue)
+						end,
+					},
+				})
+			end
+		end,
+	})
+	local label = e("TextLabel")({
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(0, 1),
+		Position = UDim2.new(0.5, 4, 0, -2),
+		Size = UDim2.fromOffset(120, 14),
+		Text = "✦ " .. labelText,
+		TextColor3 = color,
+		Font = Theme.font.bold,
+		TextSize = 10,
+		TextXAlignment = Enum.TextXAlignment.Left,
+		TextTruncate = Enum.TextTruncate.AtEnd,
+		ZIndex = 7,
+	})
+	container = e("Frame")({
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(0.5, 0.5),
+		Position = UDim2.fromScale(cue.t / dur, 0.5),
+		Size = UDim2.new(0, 130, 1, 0),
+		[Children] = { markerLine, hitTarget, label },
+	})
+	return container
+end
+
+-- 相机轨的一个生效段块:中间长按平移;左右缘长按改长度;短按选中;右键菜单。
+local function segmentBlock(
+	gui: PluginGui,
+	state: EditorState.EditorState,
+	cb: Callbacks,
+	area: () -> GuiObject,
+	track: CutsceneFormat.Track,
+	segment: CutsceneFormat.CameraSegment
 ): Instance
 	local function seg(): CutsceneFormat.CameraSegment
-		return track.segments[segIndex]
+		return segment
+	end
+	local function segIndex(): number
+		local segs = track.segments
+		if not segs then
+			return 1
+		end
+		for idx, s in segs do
+			if s == segment then
+				return idx
+			end
+		end
+		return 1
 	end
 	local block
 	local function refresh()
-		local d = state.duration:get()
+		local d = math.max(state.duration:get(), 1e-3)
 		local s = seg()
-		block.Position = UDim2.new(s.from / d, 1, 0, 4)
-		block.Size = UDim2.new(math.max((s.to - s.from) / d, 0.005), -2, 1, -8)
+		local span = math.max(s.to - s.from, 1 / math.max(state.fps:get(), 1))
+		block.Position = UDim2.new(math.clamp(s.from / d, 0, 1), 1, 0, 4)
+		block.Size = UDim2.new(math.clamp(span / d, 0.005, 1), -2, 1, -8)
 		local fpsNow = state.fps:get()
-		block.Text = TimelineUnity.cameraSegmentTitle(track)
+		local txt = TimelineUnity.cameraSegmentTitle(track)
 			.. "  "
 			.. TimelineUnity.cameraSegmentSubtitle(track, s.from, s.to, fpsNow)
+		local lbl = block:FindFirstChild("SegLabel")
+		if lbl and lbl:IsA("TextLabel") then
+			lbl.Text = txt
+		end
 	end
-	-- 点击选中本轨(按当前 tracks 数组里的索引)。
 	local function selectSelf()
 		state.selectedTrack:set(table.find(state.tracks:get(), track))
 	end
@@ -1133,164 +1986,232 @@ local function segmentBlock(
 		local sel = state.selectedTrack:get() == table.find(state.tracks:get(), track)
 		return if sel then 0 else 1
 	end)
-	local function edge(anchorX: number, isFrom: boolean): Instance
-		local edgeBtn = e("TextButton")({
-			BackgroundColor3 = Theme.color.handle,
-			BackgroundTransparency = 0.25,
-			BorderSizePixel = 0,
-			Size = UDim2.new(0, 6, 1, 0),
-			AnchorPoint = Vector2.new(anchorX, 0),
-			Position = UDim2.fromScale(anchorX, 0),
-			ZIndex = 5,
-			Text = "",
-			[OnEvent("InputBegan")] = function(input: InputObject)
-				if input.UserInputType == Enum.UserInputType.MouseButton1 then
-					local s0 = seg()
-					local grab = DragController.fracInArea(area(), gui:GetRelativeMousePosition())
-							* state.duration:get()
-						- (if isFrom then s0.from else s0.to)
-					beginTimelineDrag(gui, {
-						onBegin = function()
-							state:pushUndo()
-						end,
-						onMove = function(mouse)
-							local t = draggedTime(state, area(), mouse, grab, track, nil)
-							local s = seg()
-							if isFrom then
-								s.from = math.min(t, s.to)
-							else
-								s.to = math.max(t, s.from)
-							end
-							refresh()
-						end,
-						onEnd = function()
-							state:finishDrag()
-						end,
-						onClick = selectSelf,
-					}, edgeBtn)
-				end
-			end,
-		})
-		return edgeBtn
+
+	local function minSegDur(): number
+		return 1 / math.max(state.fps:get(), 1)
 	end
 
-	local dur = state.duration:get()
+	local function beginSegmentEdgeDrag(mode: "from" | "to", pressInput: InputObject, feedback: GuiObject)
+		local grab = DragController.fracInArea(area(), gui:GetRelativeMousePosition(), gui) * state.duration:get()
+			- (if mode == "from" then seg().from else seg().to)
+		local snapFrom, snapTo = seg().from, seg().to
+		beginTimelineDrag(gui, {
+			onBegin = function()
+				snapFrom, snapTo = seg().from, seg().to
+				state:pushUndo()
+			end,
+			onMove = function(mouse)
+				local t = draggedTime(gui, state, area(), mouse, grab, track, { segment = seg() }, { edgeMode = mode })
+				local s = seg()
+				local minLen = minSegDur()
+				if mode == "from" then
+					s.from = math.min(t, s.to - minLen)
+				else
+					s.to = math.max(t, s.from + minLen)
+				end
+				refresh()
+			end,
+			onEnd = function()
+				state:finishCameraSegmentDrag(track)
+			end,
+			onCancel = function()
+				local s = seg()
+				s.from, s.to = snapFrom, snapTo
+				refresh()
+			end,
+		}, feedback, pressInput)
+	end
+
+	local function beginSegmentBodyDrag(pressInput: InputObject)
+		local mouse = gui:GetRelativeMousePosition()
+		local blockLeft = block.AbsolutePosition.X
+		local relX = mouse.X - blockLeft
+		local w = math.max(block.AbsoluteSize.X, 1)
+		if relX < SEGMENT_EDGE_PX or relX > w - SEGMENT_EDGE_PX then
+			return
+		end
+		local grab = DragController.fracInArea(area(), mouse, gui) * state.duration:get() - seg().from
+		local len0 = seg().to - seg().from
+		local snapFrom, snapTo = seg().from, seg().to
+		beginTimelineDrag(gui, {
+			onBegin = function()
+				snapFrom, snapTo = seg().from, seg().to
+				state:pushUndo()
+			end,
+			onMove = function(moveMouse)
+				local dur = state.duration:get()
+				local newFrom = draggedTime(gui, state, area(), moveMouse, grab, track, { segment = seg() }, { edgeMode = "from" })
+				newFrom = math.clamp(newFrom, 0, math.max(0, dur - len0))
+				local s = seg()
+				s.from = newFrom
+				s.to = newFrom + len0
+				refresh()
+			end,
+			onEnd = function()
+				state:finishCameraSegmentDrag(track)
+			end,
+			onClick = function()
+				selectSelf()
+			end,
+			onCancel = function()
+				local s = seg()
+				s.from, s.to = snapFrom, snapTo
+				refresh()
+			end,
+		}, block, pressInput)
+	end
+
+	local function edgeHit(anchorX: number): Instance
+		local hitBtn: TextButton
+		hitBtn = e("TextButton")({
+			BackgroundTransparency = 1,
+			Text = "",
+			Size = UDim2.new(0, SEGMENT_EDGE_PX, 1, 0),
+			AnchorPoint = Vector2.new(anchorX, 0),
+			Position = UDim2.fromScale(anchorX, 0),
+			ZIndex = 10,
+			AutoButtonColor = false,
+			[OnEvent("InputBegan")] = function(input: InputObject)
+				if input.UserInputType == Enum.UserInputType.MouseButton1 then
+					beginSegmentEdgeDrag(if anchorX == 0 then "from" else "to", input, hitBtn)
+				end
+			end,
+			[Children] = e("Frame")({
+				BackgroundColor3 = Theme.color.handle,
+				BackgroundTransparency = 0.25,
+				BorderSizePixel = 0,
+				Size = UDim2.new(0, SEGMENT_EDGE_BAR_PX, 1, 0),
+				AnchorPoint = Vector2.new(anchorX, 0),
+				Position = UDim2.fromScale(anchorX, 0),
+				ZIndex = 1,
+				Active = false,
+			}),
+		}) :: TextButton
+		return hitBtn
+	end
+
+	local dur = math.max(state.duration:get(), 1e-3)
 	local s0 = seg()
 	local fps = state.fps:get()
 	local segText = TimelineUnity.cameraSegmentTitle(track)
 		.. "  "
 		.. TimelineUnity.cameraSegmentSubtitle(track, s0.from, s0.to, fps)
+	local leftEdge = edgeHit(0)
+	local rightEdge = edgeHit(1)
 	block = e("TextButton")({
 		BackgroundColor3 = Theme.color.track.camera,
-		BackgroundTransparency = 0.65,
-		Position = UDim2.new(s0.from / dur, 1, 0, 4),
-		Size = UDim2.new(math.max((s0.to - s0.from) / dur, 0.005), -2, 1, -8),
-		Text = segText,
-		TextColor3 = Theme.color.text,
+		BackgroundTransparency = 0.42,
+		Position = UDim2.new(math.clamp(s0.from / dur, 0, 1), 1, 0, 4),
+		Size = UDim2.new(
+			math.clamp(math.max((s0.to - s0.from) / dur, 0.005), 0.005, 1),
+			-2,
+			1,
+			-8
+		),
+		Text = "",
+		TextColor3 = Theme.color.clipLabelText,
 		TextXAlignment = Enum.TextXAlignment.Left,
 		Font = Theme.font.main,
 		TextSize = 10,
 		TextTruncate = Enum.TextTruncate.AtEnd,
 		AutoButtonColor = false,
 		ZIndex = 3,
-		-- 左键:点击选中,长按整体平移本段(保持时长,抓哪儿拖哪儿);两端 resize 由 edge 把手负责。
-		-- 右键菜单挂 InputBegan(按下即弹):与轨道行的 defer 兜底菜单同帧仲裁。
 		[OnEvent("InputBegan")] = function(input: InputObject)
 			if input.UserInputType == Enum.UserInputType.MouseButton1 then
-				local length = seg().to - seg().from
-				local grab = DragController.fracInArea(area(), gui:GetRelativeMousePosition())
-						* state.duration:get()
-					- seg().from
-				beginTimelineDrag(gui, {
-					onBegin = function()
-						state:pushUndo()
-					end,
-					onMove = function(mouse)
-						local d = state.duration:get()
-						local f = math.clamp(draggedTime(state, area(), mouse, grab, track, nil), 0, d - length)
-						local s = seg()
-						s.from = f
-						s.to = f + length
-						refresh()
-					end,
-					onEnd = function()
-						state:finishDrag()
-					end,
-					onClick = selectSelf,
-				}, block)
+				beginSegmentBodyDrag(input)
 				return
 			end
 			if input.UserInputType ~= Enum.UserInputType.MouseButton2 then
 				return
 			end
 			selectSelf()
-			ContextMenu.show(gui, {
+			local segMenu: { ContextMenu.Item } = {
 				{
 					kind = "header",
-					text = "相机轨 " .. track.target .. "(段 " .. segIndex .. ")",
+					text = "相机轨 " .. track.target .. "(段 " .. segIndex() .. ")",
 				},
-				{
-					text = "定位到段起点",
-					onClick = function()
-						state:setTime(seg().from)
-					end,
-				},
-				{
-					text = "输入起止帧…",
-					onClick = function()
-						local fps = state.fps:get()
-						local s = seg()
-						InputPrompt.show(gui, {
-							title = "起 止 帧(空格分隔,如 30 90)",
-							placeholder = "起帧 止帧",
-							default = string.format(
-								"%d %d",
-								math.round(s.from * fps),
-								math.round(s.to * fps)
-							),
-							onSubmit = function(txt)
-								local a, b = txt:match("^%s*(%-?%d+)%s+(%-?%d+)%s*$")
-								local fa, fb = tonumber(a), tonumber(b)
-								if fa and fb then
-									state:setSegmentRange(track, segIndex, fa / fps, fb / fps)
-								end
-							end,
-						})
-					end,
-				},
-				{
-					text = "＋ 在播放头处加一段",
-					onClick = function()
-						state:addSegment(track, state.currentTime:get())
-					end,
-				},
-				{
-					text = "删除此段",
-					color = Theme.color.danger,
-					onClick = function()
-						state:removeSegment(track, segIndex)
-					end,
-				},
-				{ kind = "sep" },
-				{
-					text = "删除整条相机轨",
-					color = Theme.color.danger,
-					onClick = function()
-						state:removeTrack(track)
-					end,
-				},
+			}
+			for _, pathItem in cameraPathMenuItems(gui, cb, track, state.currentTime:get(), "") do
+				table.insert(segMenu, pathItem)
+			end
+			table.insert(segMenu, { kind = "sep" })
+			table.insert(segMenu, {
+				text = "定位到段起点",
+				onClick = function()
+					state:setTime(seg().from)
+				end,
 			})
+			table.insert(segMenu, {
+				text = "输入起止帧…",
+				onClick = function()
+					local fps = state.fps:get()
+					local s = seg()
+					InputPrompt.show(gui, {
+						title = "起 止 帧(空格分隔,如 30 90)",
+						placeholder = "起帧 止帧",
+						default = string.format(
+							"%d %d",
+							math.round(s.from * fps),
+							math.round(s.to * fps)
+						),
+						onSubmit = function(txt)
+							local a, b = txt:match("^%s*(%-?%d+)%s+(%-?%d+)%s*$")
+							local fa, fb = tonumber(a), tonumber(b)
+							if fa and fb then
+								state:setSegmentRange(track, segIndex(), fa / fps, fb / fps)
+							end
+						end,
+					})
+				end,
+			})
+			table.insert(segMenu, {
+				text = "＋ 在播放头处加一段",
+				onClick = function()
+					state:addSegment(track, state.currentTime:get())
+				end,
+			})
+			table.insert(segMenu, {
+				text = "删除此段",
+				color = Theme.color.danger,
+				onClick = function()
+					state:removeSegment(track, segIndex())
+				end,
+			})
+			table.insert(segMenu, { kind = "sep" })
+			table.insert(segMenu, {
+				text = "删除整条相机轨",
+				color = Theme.color.danger,
+				onClick = function()
+					state:removeTrack(track)
+				end,
+			})
+			ContextMenu.show(gui, segMenu)
 		end,
 		[Children] = {
 			e("UICorner")({ CornerRadius = UDim.new(0, 3) }),
-			e("UIPadding")({ PaddingLeft = UDim.new(0, 9) }),
 			e("UIStroke")({
 				Color = Theme.color.accent,
 				Thickness = 2,
 				Transparency = selectedStroke,
 			}),
-			edge(0),
-			edge(1),
+			leftEdge,
+			rightEdge,
+			e("TextLabel")({
+				Name = "SegLabel",
+				BackgroundTransparency = 1,
+				Size = UDim2.fromScale(1, 1),
+				Text = segText,
+				TextColor3 = Theme.color.clipLabelText,
+				TextStrokeColor3 = Theme.color.clipLabelStroke,
+				TextStrokeTransparency = 0.35,
+				TextXAlignment = Enum.TextXAlignment.Left,
+				TextYAlignment = Enum.TextYAlignment.Center,
+				Font = Theme.font.bold,
+				TextSize = 11,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				ZIndex = 2,
+				[Children] = e("UIPadding")({ PaddingLeft = UDim.new(0, 9) }),
+			}),
 		},
 	})
 	return block
@@ -1306,9 +2227,12 @@ local function trackContent(
 	local dur = state.duration:get()
 	local kids: { Instance } = {}
 
-	if track.kind == "camera" and track.segments and #track.segments > 0 then
-		for i in track.segments do
-			table.insert(kids, segmentBlock(gui, state, area, track, i))
+	if track.kind == "camera" then
+		local segs = track.segments
+		if segs then
+			for _, seg in segs do
+				table.insert(kids, segmentBlock(gui, state, cb, area, track, seg))
+			end
 		end
 		if track.keyframes then
 			for _, kf in track.keyframes do
@@ -1323,6 +2247,14 @@ local function trackContent(
 	elseif track.kind == "event" and track.events and #track.events > 0 then
 		for _, ev in track.events do
 			table.insert(kids, eventDiamond(gui, state, area, track, ev))
+		end
+	elseif track.kind == "sound" and track.soundCues and #track.soundCues > 0 then
+		for _, cue in track.soundCues do
+			table.insert(kids, soundCueMarker(gui, state, area, track, cue))
+		end
+	elseif track.kind == "effect" and track.effectCues and #track.effectCues > 0 then
+		for _, cue in track.effectCues do
+			table.insert(kids, effectCueMarker(gui, state, area, track, cue))
 		end
 	elseif track.keyframes then
 		for _, kf in track.keyframes do
@@ -1350,7 +2282,7 @@ local function trackContent(
 						local d = state.duration:get()
 						local fps = state.fps:get()
 						local atTime = math.clamp(
-							math.round(DragController.fracInArea(area(), m) * d * fps) / fps,
+							math.round(DragController.fracInArea(area(), m, gui) * d * fps) / fps,
 							0,
 							d
 						)
@@ -1373,8 +2305,9 @@ local function trackContent(
 	})
 end
 
-local function rowFrame(index: number, bg: Color3, child: Instance): Instance
+local function rowFrame(index: number, bg: Color3, child: Instance, rowKey: string?): Instance
 	return e("Frame")({
+		Name = if rowKey then "AnimaRow_" .. rowKey else ("AnimaRow_" .. tostring(index)),
 		BackgroundColor3 = bg,
 		BorderSizePixel = 0,
 		Size = UDim2.new(1, 0, 0, Theme.size.trackHeight),
@@ -1493,17 +2426,10 @@ local function ruler(
 					local dur = math.max(state.duration:get(), 1e-3)
 					return UDim2.new(state.currentTime:get() / dur, 0, 1, 0)
 				end),
-				Size = UDim2.new(0, Theme.size.playheadHandleWidth, 1, 0),
+				Size = UDim2.new(0, Theme.size.playheadHandleWidth, 0, Theme.size.rulerHeight + Theme.size.playheadHandleExtendUp),
 				BackgroundTransparency = 1,
-				Text = "▼",
-				TextColor3 = Computed(function()
-					return if playheadHandleHover:get()
-						then Color3.fromRGB(255, 120, 120)
-						else Theme.color.playhead
-				end),
-				TextSize = 22,
-				Font = Theme.font.bold,
-				TextYAlignment = Enum.TextYAlignment.Bottom,
+				ClipsDescendants = false,
+				Text = "",
 				AutoButtonColor = false,
 				ZIndex = 50,
 				[OnEvent("MouseEnter")] = function()
@@ -1514,9 +2440,26 @@ local function ruler(
 				end,
 				[OnEvent("InputBegan")] = function(input: InputObject)
 					if input.UserInputType == Enum.UserInputType.MouseButton1 then
-						beginScrub(gui, state, area(), nil, true, playheadHeadBtn)
+						beginScrub(gui, state, area(), nil, true, playheadHeadBtn, input)
 					end
 				end,
+				[Children] = e("TextLabel")({
+					Name = "PlayheadTriangle",
+					AnchorPoint = Vector2.new(0.5, 1),
+					Position = UDim2.fromScale(0.5, 1),
+					Size = UDim2.fromOffset(Theme.size.playheadTriangleWidth, Theme.size.playheadTriangleHeight),
+					BackgroundTransparency = 1,
+					Text = "▼",
+					TextSize = 13,
+					TextColor3 = Computed(function()
+						return if playheadHandleHover:get()
+							then Color3.fromRGB(255, 120, 120)
+							else Theme.color.playhead
+					end),
+					Font = Theme.font.bold,
+					TextYAlignment = Enum.TextYAlignment.Bottom,
+					ZIndex = 51,
+				}),
 			}) :: any
 			return {
 				e("TextButton")({
@@ -1528,10 +2471,14 @@ local function ruler(
 					ZIndex = 1,
 					[OnEvent("InputBegan")] = function(input: InputObject)
 						if input.UserInputType == Enum.UserInputType.MouseButton1 then
+							local m = gui:GetRelativeMousePosition()
+							if not mouseInTimelineRuler(area(), m) then
+								return
+							end
 							local src = if input.Target and input.Target:IsA("GuiObject")
 								then input.Target :: GuiObject
 								else nil
-							beginScrub(gui, state, area(), nil, false, src)
+							beginScrub(gui, state, area(), nil, false, src, input)
 						end
 					end,
 				}),
@@ -1631,45 +2578,52 @@ end
 
 --========================= 左轨道名列 =========================--
 
--- 相机轨行内控件:曲线/直线切换 + ⏺ 录制(仅"每相机独立轨"显示)。
+-- 相机 / cameraMove 轨行内控件:路径模式 + ⏺ 录制(仅 camera 显示录制)。
 local function cameraRowControls(
 	state: EditorState.EditorState,
 	cb: Callbacks,
 	track: CutsceneFormat.Track
 ): Instance
-	if track.kind ~= "camera" then
+	if track.kind ~= "camera" and track.kind ~= "cameraMove" then
 		return e("Frame")({ BackgroundTransparency = 1, Size = UDim2.fromScale(0, 1) })
 	end
-	local recording = cb.recordingCam:get() == track.target
-	local smooth = track.smooth == true
-	return e("Frame")({
-		BackgroundTransparency = 1,
-		AnchorPoint = Vector2.new(1, 0.5),
-		Position = UDim2.new(1, -4, 0.5, 0),
-		Size = UDim2.fromOffset(42, 18),
-		ZIndex = 3,
-		[Children] = {
-			e("UIListLayout")({
-				FillDirection = Enum.FillDirection.Horizontal,
-				Padding = UDim.new(0, 3),
-				HorizontalAlignment = Enum.HorizontalAlignment.Right,
-				VerticalAlignment = Enum.VerticalAlignment.Center,
-				SortOrder = Enum.SortOrder.LayoutOrder,
-			}),
-			e("TextButton")({
-				LayoutOrder = 1,
-				Size = UDim2.fromOffset(18, 18),
-				BackgroundColor3 = if smooth then Theme.color.accent else Theme.color.panel,
-				Text = if smooth then "◠" else "—",
-				TextColor3 = Theme.color.text,
-				Font = Theme.font.bold,
-				TextSize = 12,
-				ZIndex = 3,
-				[OnEvent("Activated")] = function()
-					state:setTrackSmooth(track, not smooth)
-				end,
-				[Children] = e("UICorner")({ CornerRadius = UDim.new(0, 3) }),
-			}),
+	local recording = cb.recordingCam:get() == track.target and track.kind == "camera"
+	local bezier = track.pathMode == "bezier"
+	local smooth = track.smooth == true and not bezier
+	local pathLabel = if bezier then "⌇" elseif smooth then "◠" else "—"
+	local pathAccent = bezier or smooth
+	local children: { Instance } = {
+		e("UIListLayout")({
+			FillDirection = Enum.FillDirection.Horizontal,
+			Padding = UDim.new(0, 3),
+			HorizontalAlignment = Enum.HorizontalAlignment.Right,
+			VerticalAlignment = Enum.VerticalAlignment.Center,
+			SortOrder = Enum.SortOrder.LayoutOrder,
+		}),
+		e("TextButton")({
+			LayoutOrder = 1,
+			Size = UDim2.fromOffset(18, 18),
+			BackgroundColor3 = if pathAccent then Theme.color.accent else Theme.color.panel,
+			Text = pathLabel,
+			TextColor3 = Theme.color.text,
+			Font = Theme.font.bold,
+			TextSize = 12,
+			ZIndex = 3,
+			[OnEvent("Activated")] = function()
+				if bezier then
+					state:setTrackPathMode(track, "linear")
+				elseif smooth then
+					state:setTrackPathMode(track, "bezier")
+				else
+					state:setTrackSmooth(track, true)
+				end
+			end,
+			[Children] = e("UICorner")({ CornerRadius = UDim.new(0, 3) }),
+		}),
+	}
+	if track.kind == "camera" then
+		table.insert(
+			children,
 			e("TextButton")({
 				LayoutOrder = 2,
 				Size = UDim2.fromOffset(18, 18),
@@ -1684,13 +2638,138 @@ local function cameraRowControls(
 					cb.onCameraRecord(track)
 				end,
 				[Children] = e("UICorner")({ CornerRadius = UDim.new(0, 3) }),
+			})
+		)
+	end
+	return e("Frame")({
+		BackgroundTransparency = 1,
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, if track.kind == "camera" then -79 else -58, 0.5, 0),
+		Size = UDim2.fromOffset(if track.kind == "camera" then 42 else 21, 18),
+		ZIndex = 3,
+		[Children] = children,
+	})
+end
+
+-- 相机轨「跟随▾」:followBinding(与 vcam target 独立);右键清除。
+local function applyExplorerInstance(
+	inst: Instance,
+	onBind: (binding: string, followPart: string?) -> ()
+): boolean
+	local binding, followPart = BindingFromInstance.resolve(inst)
+	if not binding then
+		warn("[anima] 无法绑定:请选择 Workspace 下的 Model / Part / Attachment")
+		return false
+	end
+	onBind(binding, followPart)
+	local partHint = if followPart and followPart ~= "" then ` · {followPart}` else ""
+	print(`[anima] 已绑定 → {binding}{partHint}`)
+	return true
+end
+
+-- Explorer 拖放槽(PluginDragDropped) + 点击用当前选中 / 点选模式。
+local function explorerBindSlot(gui: PluginGui, layoutOrder: number, onBind: (string, string?) -> ()): Instance
+	local zone
+	zone = e("TextButton")({
+		LayoutOrder = layoutOrder,
+		Size = UDim2.fromOffset(20, 18),
+		BackgroundColor3 = Theme.color.panel,
+		Text = "⎕",
+		TextColor3 = Theme.color.textDim,
+		Font = Theme.font.main,
+		TextSize = 11,
+		ZIndex = 4,
+		AutoButtonColor = true,
+		[OnEvent("Activated")] = function()
+			local sel = Selection:Get()
+			if #sel == 1 then
+				applyExplorerInstance(sel[1], onBind)
+			else
+				BindingDrop.bindFromSelectionOrPick(gui, function(inst)
+					applyExplorerInstance(inst, onBind)
+				end)
+			end
+		end,
+		[Children] = e("UICorner")({ CornerRadius = UDim.new(0, 3) }),
+	})
+	BindingDrop.register(zone, function(inst)
+		applyExplorerInstance(inst, onBind)
+	end)
+	return zone
+end
+
+local function cameraFollowChip(
+	gui: PluginGui,
+	state: EditorState.EditorState,
+	cb: Callbacks,
+	track: CutsceneFormat.Track
+): Instance
+	if track.kind ~= "camera" then
+		return e("Frame")({ BackgroundTransparency = 1, Size = UDim2.fromScale(0, 1) })
+	end
+	local label = if track.followBinding and track.followBinding ~= ""
+		then "跟随·" .. track.followBinding
+		else "跟随▾"
+	local function bindFollow(binding: string, followPart: string?)
+		state:setCameraFollow(track, binding, followPart or "HumanoidRootPart")
+	end
+	return e("Frame")({
+		AnchorPoint = Vector2.new(1, 0.5),
+		Position = UDim2.new(1, -4, 0.5, 0),
+		Size = UDim2.fromOffset(96, 18),
+		BackgroundTransparency = 1,
+		ZIndex = 3,
+		[Children] = {
+			e("UIListLayout")({
+				FillDirection = Enum.FillDirection.Horizontal,
+				Padding = UDim.new(0, 3),
+				HorizontalAlignment = Enum.HorizontalAlignment.Right,
+				VerticalAlignment = Enum.VerticalAlignment.Center,
+				SortOrder = Enum.SortOrder.LayoutOrder,
 			}),
+			e("TextButton")({
+				LayoutOrder = 1,
+				Size = UDim2.fromOffset(72, 18),
+				BackgroundColor3 = Theme.color.binding,
+				Text = label,
+				TextColor3 = Theme.color.textDim,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				Font = Theme.font.main,
+				TextSize = 11,
+				ZIndex = 3,
+				[OnEvent("Activated")] = function()
+					pickTarget(gui, "跟随角色", cb.characterCandidates(), function(tgt)
+						state:setCameraFollow(track, tgt, "HumanoidRootPart")
+					end)
+				end,
+				[OnEvent("MouseButton2Click")] = function()
+					ContextMenu.show(gui, {
+						{ kind = "header", text = "相机跟随" },
+						{
+							text = "绑定 Explorer 选中…",
+							onClick = function()
+								BindingDrop.bindFromSelectionOrPick(gui, function(inst)
+									applyExplorerInstance(inst, bindFollow)
+								end)
+							end,
+						},
+						{
+							text = "清除跟随",
+							onClick = function()
+								state:setCameraFollow(track, nil, nil)
+							end,
+						},
+					})
+				end,
+				[Children] = e("UICorner")({ CornerRadius = UDim.new(0, 3) }),
+			}),
+			explorerBindSlot(gui, 2, bindFollow),
 		},
 	})
 end
 
 -- 轨道行右侧的绑定芯片(Timeline 的 binding 槽):常驻显示 target,点击换绑。
--- camera / cameraMove 轨的 target 是 vcam 名、右侧另有自己的控件,不给芯片。
+-- cameraMove 的 target 是 vcam 名;camera 轨用 cameraFollowChip。
 local function bindingChip(
 	gui: PluginGui,
 	state: EditorState.EditorState,
@@ -1700,26 +2779,45 @@ local function bindingChip(
 	if track.kind == "camera" or track.kind == "cameraMove" then
 		return e("Frame")({ BackgroundTransparency = 1, Size = UDim2.fromScale(0, 1) })
 	end
-	return e("TextButton")({
+	local function bindTarget(binding: string, _followPart: string?)
+		state:setTrackTarget(track, binding)
+	end
+	return e("Frame")({
 		AnchorPoint = Vector2.new(1, 0.5),
 		Position = UDim2.new(1, -4, 0.5, 0),
-		Size = UDim2.fromOffset(72, 18),
-		BackgroundColor3 = Theme.color.binding,
-		Text = track.target,
-		TextColor3 = Theme.color.textDim,
-		TextTruncate = Enum.TextTruncate.AtEnd,
-		Font = Theme.font.main,
-		TextSize = 11,
+		Size = UDim2.fromOffset(96, 18),
+		BackgroundTransparency = 1,
 		ZIndex = 3,
-		[OnEvent("Activated")] = function()
-			local cands = if track.kind == "animation"
-				then cb.characterCandidates()
-				else cb.targetCandidates()
-			pickTarget(gui, "绑定到", cands, function(tgt)
-				state:setTrackTarget(track, tgt)
-			end)
-		end,
-		[Children] = e("UICorner")({ CornerRadius = UDim.new(0, 3) }),
+		[Children] = {
+			e("UIListLayout")({
+				FillDirection = Enum.FillDirection.Horizontal,
+				Padding = UDim.new(0, 3),
+				HorizontalAlignment = Enum.HorizontalAlignment.Right,
+				VerticalAlignment = Enum.VerticalAlignment.Center,
+				SortOrder = Enum.SortOrder.LayoutOrder,
+			}),
+			e("TextButton")({
+				LayoutOrder = 1,
+				Size = UDim2.fromOffset(72, 18),
+				BackgroundColor3 = Theme.color.binding,
+				Text = track.target,
+				TextColor3 = Theme.color.textDim,
+				TextTruncate = Enum.TextTruncate.AtEnd,
+				Font = Theme.font.main,
+				TextSize = 11,
+				ZIndex = 3,
+				[OnEvent("Activated")] = function()
+					local cands = if track.kind == "animation"
+						then cb.characterCandidates()
+						else cb.targetCandidates()
+					pickTarget(gui, "绑定到", cands, function(tgt)
+						state:setTrackTarget(track, tgt)
+					end)
+				end,
+				[Children] = e("UICorner")({ CornerRadius = UDim.new(0, 3) }),
+			}),
+			explorerBindSlot(gui, 2, bindTarget),
+		},
 	})
 end
 
@@ -1794,9 +2892,9 @@ local function labelHeaderRow(
 						local items: { ContextMenu.Item } =
 							{ { kind = "header", text = "加子轨到 " .. group } }
 						table.insert(items, {
-							text = "🎥 摄像机轨",
+							text = CAMERA_CREATE_HINT,
 							onClick = function()
-								cb.onAddCameraTrack(group)
+								print("[anima] 请使用顶栏「＋ 相机」创建虚拟相机与独立相机轨")
 							end,
 						})
 						-- 动画/变换子轨先选绑定目标再建轨(Timeline 式)
@@ -1827,14 +2925,6 @@ local function labelHeaderRow(
 								state:addTrack("event", group, "事件子轨", group)
 							end,
 						})
-						for _, vn in VCam.list() do
-							table.insert(items, {
-								text = "相机运动轨 → " .. vn,
-								onClick = function()
-									state:addTrack("cameraMove", vn, "运动:" .. vn, group)
-								end,
-							})
-						end
 						ContextMenu.show(gui, items)
 					end,
 					[Children] = e("UICorner")({ CornerRadius = UDim.new(0, 3) }),
@@ -1851,6 +2941,7 @@ local function labelColumn(
 	collapsed: Fusion.Value<{ [string]: boolean }>
 ): Instance
 	local rows = Computed(function()
+		state.revision:get()
 		local tracks = state.tracks:get()
 		local kids: { Instance } = {
 			e("Frame")({ -- 表头 + 加轨道
@@ -1875,8 +2966,13 @@ local function labelColumn(
 							local ap = addTrackBtn.AbsolutePosition
 							local asz = addTrackBtn.AbsoluteSize
 							showAddTrackMenu(gui, state, cb, {
-								position = Vector2.new(ap.X - gOrigin.X, ap.Y - gOrigin.Y + asz.Y + 2),
+								position = Vector2.new(
+									ap.X - gOrigin.X + asz.X,
+									ap.Y - gOrigin.Y + asz.Y + 2
+								),
 								width = 228,
+								anchor = Vector2.new(1, 0),
+								minX = 8,
 							})
 						end,
 						[Children] = e("UICorner")({ CornerRadius = UDim.new(0, 3) }),
@@ -1915,7 +3011,10 @@ local function labelColumn(
 				local track = row.track
 				local index = i
 				local bg = Theme.color.trackHeader
-				local hasChip = track.kind ~= "camera" and track.kind ~= "cameraMove"
+				local rightInset = if track.kind == "camera"
+					then 120
+					elseif track.kind == "cameraMove" then 44
+					else 108
 				local title = TimelineUnity.trackTitle(track)
 				local subtitle = TimelineUnity.trackBindingLine(track)
 				local trackIndex = table.find(tracks, track)
@@ -1955,9 +3054,7 @@ local function labelColumn(
 								e("Frame")({
 									BackgroundTransparency = 1,
 									Position = UDim2.fromOffset(30, 0),
-									Size = if hasChip
-										then UDim2.new(1, -108, 1, 0)
-										else UDim2.new(1, -44, 1, 0),
+									Size = UDim2.new(1, -rightInset, 1, 0),
 									[Children] = {
 										e("TextButton")({
 											BackgroundTransparency = 1,
@@ -1993,9 +3090,11 @@ local function labelColumn(
 									Transparency = selectedStroke,
 								}),
 								cameraRowControls(state, cb, track),
+								cameraFollowChip(gui, state, cb, track),
 								bindingChip(gui, state, cb, track),
 							},
-						})
+						}),
+						`l_${index}_${track.kind}_${track.target}`
 					)
 				)
 			end
@@ -2082,6 +3181,7 @@ local function timeline(
 	end
 
 	local rows = Computed(function()
+		state.revision:get()
 		local tracks = state.tracks:get()
 		local kids: { Instance } = { ruler(gui, state, area, areaWidth) }
 		for i, row in buildDisplayRows(tracks, collapsed:get()) do
@@ -2098,7 +3198,7 @@ local function timeline(
 				local track = row.track
 				local index = i
 				local bg = Theme.color.trackHeader
-				table.insert(kids, rowFrame(index, bg, trackContent(gui, state, cb, area, track)))
+				table.insert(kids, rowFrame(index, bg, trackContent(gui, state, cb, area, track), `t_${index}_${track.kind}_${track.target}`))
 			end
 		end
 		return kids
@@ -2283,6 +3383,7 @@ function App.mount(
 	state: EditorState.EditorState,
 	cb: Callbacks
 ): (Instance, () -> ())
+	BindingDrop.install(gui)
 	local previewCollapsed = Fusion.Value(false)
 	local previewHeight = Fusion.Value(220) -- 内嵌预览高度(可拖分隔条调)
 	local collapsed: Fusion.Value<{ [string]: boolean }> = Fusion.Value({})
@@ -2320,7 +3421,7 @@ function App.mount(
 						onMove = function(mouse)
 							previewHeight:set(math.clamp(mouse.Y - Theme.size.topbar, 90, 480))
 						end,
-					}, if resizeBar and resizeBar:IsA("GuiObject") then resizeBar else nil)
+					}, if resizeBar and resizeBar:IsA("GuiObject") then resizeBar else nil, input)
 				end
 			end,
 		}),
@@ -2372,20 +3473,41 @@ function App.mount(
 		[Children] = e("UICorner")({ CornerRadius = UDim.new(0, 4) }),
 	})
 
+	local authoringBadge = e("TextLabel")({
+		Name = "AuthoringBadge",
+		AnchorPoint = Vector2.new(0.5, 0),
+		Position = UDim2.new(0.5, 0, 0, Theme.size.topbar + 6),
+		Size = UDim2.fromOffset(360, 22),
+		BackgroundColor3 = Theme.color.track.camera,
+		BackgroundTransparency = 0.15,
+		Visible = Computed(function()
+			return cb.authoringMode:get() and cb.adjustingKf:get() == nil
+		end),
+		Text = "🎥 透视编辑:WASD 摆构图 · K 打帧 · 拖青/紫把手改 key · scrub 不改主视口",
+		TextColor3 = Theme.color.text,
+		Font = Theme.font.main,
+		TextSize = 11,
+		ZIndex = 49,
+		[Children] = e("UICorner")({ CornerRadius = UDim.new(0, 4) }),
+	})
+
 	local root = e("Frame")({
 		Name = "AnimaTimeline",
 		BackgroundColor3 = Theme.color.bg,
 		Size = UDim2.fromScale(1, 1),
 		BorderSizePixel = 0,
+		ZIndex = 1,
 		[Children] = {
 			topbar(gui, state, cb, previewCollapsed),
 			previewContainer,
 			vcamWrap,
 			body,
+			authoringBadge,
 			adjustBadge,
 		},
 	})
 	root.Parent = gui
+	OverlayHost.ensure(gui)
 
 	-- 让 init 把 PreviewViewport 挂进预览容器
 	cb.mountPreview(previewContainer)

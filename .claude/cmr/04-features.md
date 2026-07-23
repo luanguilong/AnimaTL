@@ -8,7 +8,7 @@
 
 | 功能 | 说明 | 状态 |
 |------|------|------|
-| CutsceneFormat | 唯一真相:Cutscene → tracks[](camera/transform/animation/event/cameraMove)→ keyframes/clips/events;Track 含 target/group/from/to/smooth | ✅ |
+| CutsceneFormat | 唯一真相:Cutscene → tracks[](…);AnimationClip 含可选 `rigType`(08);`clipMatchesRig` / `clipsForRig` | ✅ |
 | Easing | linear / quadIn·Out·InOut / cubicInOut / sine | ✅ |
 | Sampler | CFrame 关键帧插值;smooth 且 ≥3 帧时位置走 Catmull-Rom 曲线、旋转 slerp | ✅ |
 | VCam | vcam(隐形 Part)解析:CFrame 机位 + LookAt/FOV attribute;list/find/getContainer | ✅ |
@@ -22,7 +22,7 @@
 | CutscenePlayer | RenderStepped 播放头调度,`play(onDone)`;注入 resolver/camera/onEvent | ✅ |
 | CameraTrack | "相机导演":整场一个实例,用 CameraDirector 求值驱动 CurrentCamera | ✅ |
 | CharacterBinder | 动画绑玩家**真实 Character**(只驱动 Motor6D,装扮/配件天然跟随);R6 骨架 | 🟡 装扮跟随待 Play 模式最终验证(需真实动画 id) |
-| TransformTrack / EventTrack | CFrame 采样应用 / 事件按名分发到 onEvent | ✅ |
+| TransformTrack / EventTrack / SoundTrack / EffectTrack | CFrame 应用 / 事件 / 音效·特效 cue | ✅ |
 | AnimaBootstrap 示例 | client 端 `_G.AnimaPlayBossIntro()` 播 boss_intro | ✅(动画 id 仍是占位) |
 
 ## 3. 插件 — 面板结构与工具条(`src/plugin/`)
@@ -35,14 +35,14 @@
 | vcam 管理条 | 列出所有 vcam(名·FOV·→LookAt);点选中定位 gizmo;右键改属性/改名/删 | 🟡(右键菜单) |
 | 左轨道列 | 表头「＋轨道」按钮;轨道行(色条+名+绑定芯片);分组表头行(▸/▾ 折叠 + ＋子轨);相机轨行内 ◠/— 曲线切换 + ⏺ 录制 | 🟡(菜单入口) |
 | 右时间轴 | 帧标尺(自适应网格)+ 竖网格线 + 播放头(红线+把手)+ 横向 ScrollingFrame;滚轮以鼠标为锚缩放 + 右下角缩放按钮 | ✅ |
-| 导出 | Serializer:Cutscene → 可 require 的 `.luau` 源码(CFrame 12 分量无损)→ ReplicatedStorage.AnimaExport,MCP 写回文件 | ✅ |
+| 导出 | Serializer → ModuleScript；**可选区间**（起止帧/秒，slice 后 duration 缩短、时间从 0 起）；编辑器数据不变 | ✅ |
 
 ## 4. 插件 — 时间轴编辑交互
 
 统一手感规则(DragController,交互修复批二定稿):
 
 - **严格长按拖拽**:按住且基本不动 **0.35s** 才进入拖拽跟随;时间没到就移动 = 本次取消(不拖不点);快速松开 = 纯点击(选中/取消/seek)。单击、快速划过**绝不误拖**。
-- **吸附**:整数秒 + 其它标记时间(8px 阈值),再量化到帧(1/fps);按住 **Alt** = 自由不吸附。
+- **吸附(Snap V1)**:整秒 + 同轨标记(clip/段头尾、关键帧等)+ **播放头**;缘拖/平移时 **同距离优先头尾接龙**;8px 阈值后再量化到帧(1/fps);**Alt** = 自由不吸附;**Shift** = 跨轨候选(V2,已实现接口)。
 - **拖拽实时反馈**:拖动中不 commit(直接改数据+挪实例),松手 finishDrag 排序提交;预览/3D 轨迹每帧跟随。
 - 会话自愈:松开事件漏收时,下一次按下自动作废旧会话(不再"粘鼠标")。
 
@@ -72,7 +72,7 @@
 |------|------|------|
 | PreviewViewport | ViewportFrame 实时预览:Lighting 拷贝 + 地面克隆 + 按 revision 重建;动画 TimePosition 定帧(循环取模/非循环 clamp) | ✅ |
 | LivePreview(🖥 跟随) | 一键接管主视口相机全保真跟随,再点归还;👁 lookThrough 取景 | ✅ |
-| CameraPath | 3D 视口运镜轨迹:发光曲线 + 机位球 + 朝向短杆 + 当前点滑动;Locked/CanQuery=false 不污染场景;面板开建关毁 | ✅ |
+| CameraPath | 3D 视口运镜轨迹 + 贝塞尔切线 gizmo；**预览折线段数**可右键调(自动/固定/倍率,Plugin 偏好,不影响播放) | ✅ |
 | 编辑态 scrub 联动 | Preview 把 transform/camera 求值实时应用到编辑器场景 | ✅ |
 
 ## 6. 已知取舍 / 限制(详见 02-todo)

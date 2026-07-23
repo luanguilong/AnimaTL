@@ -19,6 +19,9 @@ local VCam = require(Shared.VCam)
 local Sampler = require(Shared.Sampler)
 local CutsceneFormat = require(Shared.CutsceneFormat)
 local SceneResolver = require(script.Parent.SceneResolver)
+local AnimationPreview = require(script.Parent.AnimationPreview)
+local MediaPreview = require(script.Parent.MediaPreview)
+local ViewportFxFeedback = require(script.Parent.ViewportFxFeedback)
 
 local PreviewViewport = {}
 PreviewViewport.__index = PreviewViewport
@@ -31,28 +34,76 @@ export type PreviewViewport = typeof(setmetatable(
 		info: TextLabel,
 		_clones: { [string]: Instance },
 		_ground: Instance?,
-		_animTracks: { [string]: AnimationTrack }, -- "target|animId" -> 定帧用 track
+		_animTracks: AnimationPreview.TrackCache,
 		_conn: RBXScriptConnection?,
 		_getCutscene: (() -> CutsceneFormat.Cutscene)?,
 		_getTime: (() -> number)?,
+		_lastMediaT: number,
+		_getRevision: (() -> number)?,
 	},
 	PreviewViewport
 ))
 
--- 克隆进预览世界(去脚本、全锚定)。
+-- 克隆进预览世界。带 Humanoid 的角色不锚定肢体(否则 LoadAnimation 看不到动作)。
+local function isCharacterModel(inst: Instance): boolean
+	return inst:IsA("Model") and inst:FindFirstChildOfClass("Humanoid") ~= nil
+end
+
 local function makeClone(inst: Instance): Instance
 	local clone = inst:Clone()
+	local isChar = isCharacterModel(clone)
 	for _, d in clone:GetDescendants() do
 		if d:IsA("BaseScript") then
 			d:Destroy()
 		elseif d:IsA("BasePart") then
-			d.Anchored = true
+			if isChar then
+				d.Anchored = false
+				d.CanCollide = false
+			else
+				d.Anchored = true
+			end
 		end
 	end
 	if clone:IsA("BasePart") then
-		clone.Anchored = true
+		clone.Anchored = not isChar
+	end
+	if isChar and clone:IsA("Model") then
+		local hum = clone:FindFirstChildOfClass("Humanoid")
+		if hum then
+			hum.PlatformStand = false
+		end
+		if inst:IsA("Model") then
+			clone:PivotTo(inst:GetPivot())
+		elseif inst:IsA("BasePart") then
+			clone:PivotTo(inst.CFrame)
+		else
+			clone:PivotTo(CFrame.new(0, 3, 0))
+		end
 	end
 	return clone
+end
+
+local function syncCloneFromSource(clone: Instance, source: Instance)
+	if source:IsA("Model") and clone:IsA("Model") then
+		clone:PivotTo(source:GetPivot())
+	elseif source:IsA("BasePart") and clone:IsA("BasePart") then
+		clone.CFrame = source.CFrame
+	elseif source:IsA("Model") and clone:IsA("BasePart") then
+		clone.CFrame = source:GetPivot()
+	elseif source:IsA("BasePart") and clone:IsA("Model") then
+		clone:PivotTo(source.CFrame)
+	end
+end
+
+local _warnedMissingClone: { [string]: boolean } = {}
+
+local function cutsceneUsesTarget(cutscene: CutsceneFormat.Cutscene, name: string): boolean
+	for _, tr in cutscene.tracks do
+		if (tr.kind == "animation" or tr.kind == "transform") and tr.target == name then
+			return true
+		end
+	end
+	return false
 end
 
 -- 一条构图参考线。
@@ -82,8 +133,9 @@ function PreviewViewport.new(parent: Instance): PreviewViewport
 
 	local cam = Instance.new("Camera")
 	cam.FieldOfView = 70
-	cam.Parent = vf
+	cam.Parent = world
 	vf.CurrentCamera = cam
+	ViewportFxFeedback.bindViewport(vf)
 
 	-- 电影黑边(上下,近似 2.35:1 观感)
 	for _, y in { 0, 1 } do
@@ -137,15 +189,45 @@ function PreviewViewport.new(parent: Instance): PreviewViewport
 		_conn = nil,
 		_getCutscene = nil,
 		_getTime = nil,
+		_lastMediaT = 0,
+		_getRevision = nil,
 	}, PreviewViewport)
+end
+
+local function findDescendantInClone(
+	wsTarget: Instance,
+	rigBinding: string,
+	clones: { [string]: Instance }
+): Instance?
+	local rigSrc = SceneResolver.resolve(rigBinding)
+	local rigClone = clones[rigBinding]
+	if not rigSrc or not rigClone or not wsTarget:IsDescendantOf(rigSrc) then
+		return nil
+	end
+	local segments: { string } = {}
+	local cur: Instance? = wsTarget
+	while cur and cur ~= rigSrc do
+		table.insert(segments, 1, cur.Name)
+		cur = cur.Parent
+	end
+	local node: Instance? = rigClone
+	for _, seg in segments do
+		if not node then
+			return nil
+		end
+		node = node:FindFirstChild(seg)
+	end
+	return node
 end
 
 -- 收集过场涉及的目标名(transform / animation / vcam LookAt)。
 local function collectTargets(cutscene: CutsceneFormat.Cutscene): { string }
 	local set: { [string]: boolean } = {}
 	for _, track in cutscene.tracks do
-		if track.kind == "transform" or track.kind == "animation" then
+		if track.kind == "transform" or track.kind == "animation" or track.kind == "effect" or track.kind == "sound" then
 			set[track.target] = true
+		elseif track.kind == "camera" and track.followBinding and track.followBinding ~= "" then
+			set[track.followBinding] = true
 		end
 	end
 	for _, name in VCam.list() do
@@ -162,24 +244,40 @@ local function collectTargets(cutscene: CutsceneFormat.Cutscene): { string }
 	return out
 end
 
--- 依据过场重建克隆集合(目标 + 地面参考)。
+-- 依据过场重建克隆集合(目标 + 地面参考)。同一 Workspace 实例只克隆一次(多轨/Player+真名不重复)。
 function PreviewViewport.rebuild(self: PreviewViewport, cutscene: CutsceneFormat.Cutscene)
+	local destroyed: { [Instance]: boolean } = {}
 	for _, c in self._clones do
-		c:Destroy()
+		if not destroyed[c] then
+			destroyed[c] = true
+			c:Destroy()
+		end
 	end
 	self._clones = {}
-	self._animTracks = {} -- 旧 AnimationTrack 随旧克隆的 Animator 失效
+	self._lastMediaT = 0
+	MediaPreview.reset("viewport")
+	AnimationPreview.clearCache(self._animTracks)
 	if self._ground then
 		self._ground:Destroy()
 		self._ground = nil
 	end
 
+	local clonedSource: { [Instance]: Instance } = {}
 	for _, name in collectTargets(cutscene) do
 		local inst = SceneResolver.resolve(name)
 		if inst and (inst:IsA("BasePart") or inst:IsA("Model")) then
-			local clone = makeClone(inst)
-			clone.Parent = self.world
+			local clone = clonedSource[inst]
+			if not clone then
+				clone = makeClone(inst)
+				clone.Parent = self.world
+				clonedSource[inst] = clone
+			end
 			self._clones[name] = clone
+		elseif cutsceneUsesTarget(cutscene, name) and not _warnedMissingClone[name] then
+			_warnedMissingClone[name] = true
+			warn(
+				`[anima] 预览找不到目标 '{name}'。Player=Workspace 顶层 Rig(或 Play 时 LocalPlayer);请命名为 Player/Rig 或绑定具体物体名`
+			)
 		end
 	end
 
@@ -197,8 +295,12 @@ function PreviewViewport.rebuild(self: PreviewViewport, cutscene: CutsceneFormat
 end
 
 -- 求某时刻的相机 CFrame + FOV + 上镜相机名(CameraDirector 择一)。
-local function evalCamera(cutscene: CutsceneFormat.Cutscene, t: number): (CFrame?, number?, string?)
-	local cf, name = CameraDirector.evaluate(cutscene, t)
+local function evalCamera(
+	cutscene: CutsceneFormat.Cutscene,
+	t: number,
+	resolveBinding: CutsceneFormat.BindingResolver?
+): (CFrame?, number?, string?)
+	local cf, name = CameraDirector.evaluate(cutscene, t, resolveBinding)
 	local fov: number? = nil
 	if name then
 		local part = VCam.find(name)
@@ -210,42 +312,23 @@ local function evalCamera(cutscene: CutsceneFormat.Cutscene, t: number): (CFrame
 	return cf, fov, name
 end
 
--- 取(或建)克隆角色上某 animationId 的定帧 AnimationTrack。无 Humanoid/加载失败返回 nil。
-local function getAnimTrack(self: PreviewViewport, clone: Instance, animId: string): AnimationTrack?
-	local key = clone.Name .. "|" .. animId
-	local existing = self._animTracks[key]
-	if existing then
-		return existing
-	end
-	if not clone:IsA("Model") then
-		return nil
-	end
-	local hum = clone:FindFirstChildOfClass("Humanoid")
-	if not hum then
-		return nil
-	end
-	local animator = hum:FindFirstChildOfClass("Animator")
-	if not animator then
-		animator = Instance.new("Animator")
-		animator.Parent = hum
-	end
-	local anim = Instance.new("Animation")
-	anim.AnimationId = animId
-	local ok, track = pcall(function()
-		return (animator :: Animator):LoadAnimation(anim)
-	end)
-	if not ok or not track then
-		return nil
-	end
-	track:Play()
-	track:AdjustSpeed(0) -- 冻结,靠 TimePosition 定帧(scrub 时定格到对应帧)
-	self._animTracks[key] = track
-	return track
-end
-
 -- 更新一帧:相机 + transform 克隆 + 动画定帧 + 信息叠加。
-function PreviewViewport.update(self: PreviewViewport, cutscene: CutsceneFormat.Cutscene, t: number)
-	local camCF, fov, active = evalCamera(cutscene, t)
+function PreviewViewport.update(self: PreviewViewport, cutscene: CutsceneFormat.Cutscene, t: number, stepDt: number?)
+	-- 跟随对齐:每个克隆源只对齐一次(多 binding 名指向同一 Rig 时不重复 Pivot)。
+	local syncedClone: { [Instance]: boolean } = {}
+	for _, track in cutscene.tracks do
+		if track.kind == "camera" and track.followBinding and track.followBinding ~= "" then
+			local name = track.followBinding
+			local clone = self._clones[name]
+			local source = SceneResolver.resolve(name)
+			if clone and source and not syncedClone[clone] then
+				syncedClone[clone] = true
+				syncCloneFromSource(clone, source)
+			end
+		end
+	end
+
+	local camCF, fov, active = evalCamera(cutscene, t, SceneResolver.resolve)
 	if camCF then
 		self.cam.CFrame = camCF
 	end
@@ -269,52 +352,59 @@ function PreviewViewport.update(self: PreviewViewport, cutscene: CutsceneFormat.
 		end
 	end
 
-	-- 动画轨:在克隆角色上按 (t - startAt) 定帧(无效/未加载 id 静默跳过)
+	-- 动画轨:在克隆角色上定帧
 	for _, track in cutscene.tracks do
 		if track.kind == "animation" and track.clips then
 			local clone = self._clones[track.target]
-			if clone then
-				for _, clip in track.clips do
-					if clip.animationId ~= "" and clip.animationId ~= "rbxassetid://0" then
-						local at = getAnimTrack(self, clone, clip.animationId)
-						if at then
-							if t >= clip.startAt then
-								local pos = (t - clip.startAt) * (clip.speed or 1)
-								local len = at.Length
-								if len > 0 then
-									if clip.looped then
-										pos %= len
-									else
-										pos = math.clamp(pos, 0, len)
-									end
-								end
-								at.TimePosition = pos
-							else
-								at.TimePosition = 0
-							end
-						end
+			if clone and clone:IsA("Model") then
+				AnimationPreview.stepClipsOnModel(clone, track.target, track.clips, t, self._animTracks, stepDt)
+			end
+		end
+	end
+
+	local function resolveInViewport(binding: string): Instance?
+		local wsInst = SceneResolver.resolve(binding)
+		if wsInst then
+			for _, tr in cutscene.tracks do
+				if tr.kind == "animation" then
+					local inClone = findDescendantInClone(wsInst, tr.target, self._clones)
+					if inClone then
+						return inClone
 					end
 				end
 			end
 		end
+		if self._clones[binding] then
+			return self._clones[binding]
+		end
+		return wsInst
 	end
+
+	MediaPreview.step(cutscene, t, self._lastMediaT, resolveInViewport, "viewport", {
+		workspaceResolve = SceneResolver.resolve,
+		cutsceneRevision = if self._getRevision then self._getRevision() else nil,
+		viewportFrame = self.vf,
+	})
+	self._lastMediaT = t
 end
 
 -- 开始持续更新(观察外部的 cutscene / time)。
 function PreviewViewport.start(
 	self: PreviewViewport,
 	getCutscene: () -> CutsceneFormat.Cutscene,
-	getTime: () -> number
+	getTime: () -> number,
+	getRevision: (() -> number)?
 )
 	self._getCutscene = getCutscene
 	self._getTime = getTime
+	self._getRevision = getRevision
 	self:rebuild(getCutscene())
 	if self._conn then
 		self._conn:Disconnect()
 	end
-	self._conn = RunService.RenderStepped:Connect(function()
+	self._conn = RunService.RenderStepped:Connect(function(stepDt: number)
 		local ok, err = pcall(function()
-			self:update(getCutscene(), getTime())
+			self:update(getCutscene(), getTime(), stepDt)
 		end)
 		if not ok then
 			warn("[anima] 预览出错:", err)

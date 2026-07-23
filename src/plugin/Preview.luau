@@ -3,15 +3,29 @@
 -- 复用 runtime 的 Sampler(编辑&运行时同一套求值,保证所见即所得)。
 --
 -- camera:设 workspace.CurrentCamera.CFrame(编辑器视角随播放头移动)。
--- transform:按 target 名在 workspace 找物体,设其 CFrame/Pivot。
+-- transform:门/Boss 等仍在 Workspace;带 Humanoid 的角色只在 PreviewViewport 克隆上预览(避免真身+多克隆叠影)。
 
 local Sampler = require(script.Parent.Shared.Sampler)
 local CutsceneFormat = require(script.Parent.Shared.CutsceneFormat)
 local SceneResolver = require(script.Parent.SceneResolver)
+local AnimationPreview = require(script.Parent.AnimationPreview)
+local MediaPreview = require(script.Parent.MediaPreview)
 
 local Preview = {}
 
 local resolve = SceneResolver.resolve
+local _animCache: AnimationPreview.TrackCache = {}
+local _lastPreviewT = 0
+
+-- 面板内 Viewport 预览开启时,音效/特效改在克隆上播,避免只打 Workspace 真身。
+-- 小窗预览开启时仍单独推进 Workspace 特效(主视口可见)。
+Preview.skipWorkspaceMedia = false
+Preview.cutsceneRevision = 0
+local _lastPreviewWsFxT = 0
+
+local function isCharacterModel(inst: Instance): boolean
+	return inst:IsA("Model") and inst:FindFirstChildOfClass("Humanoid") ~= nil
+end
 
 local function applyCFrame(target: Instance, cf: CFrame)
 	if target:IsA("BasePart") or target:IsA("Camera") then
@@ -21,18 +35,53 @@ local function applyCFrame(target: Instance, cf: CFrame)
 	end
 end
 
+function Preview.clearAnimationCache()
+	AnimationPreview.clearCache(_animCache)
+	MediaPreview.reset()
+	_lastPreviewT = 0
+	_lastPreviewWsFxT = 0
+end
+
 -- 在时间 t 应用一帧预览。includeCamera=false 时不动相机(避免抢视角)。
 function Preview.applyAt(cutscene: CutsceneFormat.Cutscene, t: number, includeCamera: boolean)
+	if Preview.skipWorkspaceMedia then
+		MediaPreview.step(cutscene, t, _lastPreviewWsFxT, SceneResolver.resolve, "workspace-effects", {
+			kinds = { effect = true },
+			cutsceneRevision = Preview.cutsceneRevision,
+		})
+		_lastPreviewWsFxT = t
+	end
+	if not Preview.skipWorkspaceMedia then
+		MediaPreview.step(cutscene, t, _lastPreviewT, nil, "workspace", {
+			cutsceneRevision = Preview.cutsceneRevision,
+		})
+	end
+	_lastPreviewT = t
+	AnimationPreview.pruneCache(_animCache)
 	for _, track in cutscene.tracks do
 		if (track.kind == "camera" and includeCamera) or track.kind == "transform" then
 			if track.keyframes and #track.keyframes > 0 then
 				local cf = Sampler.sampleCFrame(track.keyframes, t)
 				if cf then
 					local target = resolve(track.target)
-					if target then
+					if target and target:IsDescendantOf(workspace) and not isCharacterModel(target) then
 						applyCFrame(target, cf)
 					end
 				end
+			end
+		end
+	end
+	for _, track in cutscene.tracks do
+		if track.kind == "animation" and track.clips then
+			local target = resolve(track.target)
+			if target and target:IsA("Model") and target:IsDescendantOf(workspace) then
+				if isCharacterModel(target) then
+					AnimationPreview.stopBinding(_animCache, track.target)
+					continue
+				end
+				AnimationPreview.stepClipsOnModel(target, track.target, track.clips, t, _animCache)
+			else
+				AnimationPreview.stopBinding(_animCache, track.target)
 			end
 		end
 	end
