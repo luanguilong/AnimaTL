@@ -1,6 +1,6 @@
 --!strict
--- AnimaBootstrap — 进游戏按 V 播放 Player_lvti。
--- 依赖: ReplicatedStorage.Anima(Runtime + Cutscenes.Player_lvti)、ForgeVFX、场景 vcam。
+-- AnimaBootstrap — 进游戏按键播放过场(绑定表见 CUTSCENE_BINDINGS)。
+-- 依赖: ReplicatedStorage.Anima(Runtime + Cutscenes.<名>)、ForgeVFX、场景 vcam。
 
 local ContextActionService = game:GetService("ContextActionService")
 local Players = game:GetService("Players")
@@ -10,10 +10,12 @@ local Anima = ReplicatedStorage:WaitForChild("Anima")
 local CutscenePlayer = require(Anima.Runtime.CutscenePlayer)
 local ForgeEffectPlay = require(Anima.Shared.ForgeEffectPlay)
 
-local CUTSCENE_MODULE_NAME = "Player_lvti"
+-- 按键 → Cutscenes 下模块名。加新过场只需在这里添一行。
+local CUTSCENE_BINDINGS: { [Enum.KeyCode]: string } = {
+	[Enum.KeyCode.V] = "Player_lvti",
+	[Enum.KeyCode.One] = "axe_finisher",
+}
 local VFX_PACK_NAME = "驴踢"
-local PLAY_KEY = Enum.KeyCode.V
-local PLAY_ACTION = "AnimaPlayPlayerLvTi"
 
 local localPlayer = Players.LocalPlayer
 local activeCutscenePlayer: any = nil
@@ -110,19 +112,17 @@ local function bindingResolver(name: string): Instance?
 	return workspace:FindFirstChild(name, true)
 end
 
-local function loadCutsceneModule(): ModuleScript?
+local function loadCutsceneModule(name: string): ModuleScript?
 	local cutscenes = Anima:WaitForChild("Cutscenes")
-	local mod = cutscenes:FindFirstChild(CUTSCENE_MODULE_NAME)
+	local mod = cutscenes:FindFirstChild(name)
 	if mod and mod:IsA("ModuleScript") then
 		return mod
 	end
-	warn(
-		`[anima] 缺少 Cutscenes.{CUTSCENE_MODULE_NAME} — 请在 Timeline 💾 导出模块名 {CUTSCENE_MODULE_NAME}`
-	)
+	warn(`[anima] 缺少 Cutscenes.{name} — 请在 Timeline 💾 导出模块名 {name}`)
 	return nil
 end
 
-local function playPlayerLvTi()
+local function playCutscene(name: string)
 	if activeCutscenePlayer and activeCutscenePlayer._playing then
 		return
 	end
@@ -133,7 +133,7 @@ local function playPlayerLvTi()
 	end
 	attachVfxPackToCharacter(char)
 
-	local mod = loadCutsceneModule()
+	local mod = loadCutsceneModule(name)
 	if not mod then
 		return
 	end
@@ -153,7 +153,7 @@ local function playPlayerLvTi()
 		end,
 	})
 	activeCutscenePlayer:play(function()
-		print(`[anima] {CUTSCENE_MODULE_NAME} 播放完成`)
+		print(`[anima] {name} 播放完成`)
 		activeCutscenePlayer = nil
 	end)
 end
@@ -168,20 +168,22 @@ if localPlayer.Character then
 end
 localPlayer.CharacterAdded:Connect(onCharacterAdded)
 
-ContextActionService:BindAction(PLAY_ACTION, function(_name, inputState)
-	if inputState == Enum.UserInputState.Begin then
-		playPlayerLvTi()
-	end
-	return Enum.ContextActionResult.Pass
-end, false, PLAY_KEY)
+local bindingDesc = {}
+for key, cutsceneName in CUTSCENE_BINDINGS do
+	ContextActionService:BindAction("AnimaPlay_" .. cutsceneName, function(_name, inputState)
+		if inputState == Enum.UserInputState.Begin then
+			playCutscene(cutsceneName)
+		end
+		return Enum.ContextActionResult.Pass
+	end, false, key)
+	table.insert(bindingDesc, key.Name .. "→" .. cutsceneName)
+end
 
--- selene: allow(global_usage)
-_G.AnimaPlayPlayerLvTi = playPlayerLvTi
--- selene: allow(global_usage) -- 刻意暴露的调试入口
-_G.AnimaPlayRig1LvTi = playPlayerLvTi
--- selene: allow(global_usage)
-_G.AnimaPlayBossIntro = playPlayerLvTi
+-- selene: allow(global_usage) -- 刻意暴露的调试入口:_G.AnimaPlay("模块名")
+_G.AnimaPlay = playCutscene
+-- selene: allow(global_usage) -- 旧入口兼容
+_G.AnimaPlayPlayerLvTi = function()
+	playCutscene("Player_lvti")
+end
 
-print(
-	`[anima] 进游戏按 {PLAY_KEY.Name} 播放 {CUTSCENE_MODULE_NAME} · 或 _G.AnimaPlayPlayerLvTi()`
-)
+print("[anima] 过场按键:" .. table.concat(bindingDesc, " · ") .. ' · 或 _G.AnimaPlay("模块名")')
