@@ -61,6 +61,7 @@ export type CutscenePlayer = typeof(setmetatable(
 		_clips: { ClipState },
 		_binders: { [Model]: CharacterBinder.CharacterBinder },
 		_conn: RBXScriptConnection?,
+		_renderBindId: string?,
 		_time: number,
 		_playing: boolean,
 	},
@@ -89,6 +90,7 @@ function CutscenePlayer.new(cutscene: CutsceneFormat.Cutscene, config: Config): 
 		_clips = {},
 		_binders = {},
 		_conn = nil,
+		_renderBindId = nil,
 		_time = 0,
 		_playing = false,
 	}, CutscenePlayer)
@@ -234,7 +236,9 @@ function CutscenePlayer.play(self: CutscenePlayer, onComplete: (() -> ())?)
 
 	self:_step(0)
 
-	self._conn = RunService.RenderStepped:Connect(function(dt: number)
+	-- 用 BindToRenderStep(Last) 而非 RenderStepped 事件:排在引擎动画步进之后,
+	-- 否则 Animator/Humanoid 每帧会把 rigAnim 写的 Motor6D.Transform 冲掉(Moonlite 同款)。
+	local function onFrame(dt: number)
 		if not self._playing then
 			return
 		end
@@ -248,7 +252,14 @@ function CutscenePlayer.play(self: CutscenePlayer, onComplete: (() -> ())?)
 		else
 			self:_step(t)
 		end
-	end)
+	end
+	if RunService:IsClient() then
+		local bindId = "AnimaCutscene_" .. self.cutscene.name .. "_" .. tostring(os.clock())
+		self._renderBindId = bindId
+		RunService:BindToRenderStep(bindId, Enum.RenderPriority.Last.Value, onFrame)
+	else
+		self._conn = RunService.Heartbeat:Connect(onFrame)
+	end
 end
 
 -- 停止并清理(相机归还、动画淡出)。
@@ -260,6 +271,10 @@ function CutscenePlayer.stop(self: CutscenePlayer)
 	if self._conn then
 		self._conn:Disconnect()
 		self._conn = nil
+	end
+	if self._renderBindId then
+		RunService:UnbindFromRenderStep(self._renderBindId)
+		self._renderBindId = nil
 	end
 	for _, ct in self._cameraTracks do
 		ct:finish()
