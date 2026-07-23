@@ -22,6 +22,7 @@ local SceneResolver = require(script.Parent.SceneResolver)
 local AnimationPreview = require(script.Parent.AnimationPreview)
 local MediaPreview = require(script.Parent.MediaPreview)
 local PropertyPreview = require(script.Parent.PropertyPreview)
+local RigAnimPreview = require(script.Parent.RigAnimPreview)
 local ViewportFxFeedback = require(script.Parent.ViewportFxFeedback)
 
 local PreviewViewport = {}
@@ -231,6 +232,7 @@ local function collectTargets(cutscene: CutsceneFormat.Cutscene): { string }
 			or track.kind == "effect"
 			or track.kind == "sound"
 			or track.kind == "property"
+			or track.kind == "rigAnim"
 		then
 			set[track.target] = true
 		elseif track.kind == "camera" and track.followBinding and track.followBinding ~= "" then
@@ -409,6 +411,8 @@ function PreviewViewport.update(
 		viewportFrame = self.vf,
 	})
 	PropertyPreview.apply(cutscene, t, resolveInViewport, "viewport")
+	-- 小窗克隆的关节动画(C0 偏移;克隆销毁时 restore 里 Parent 判空自然跳过)
+	RigAnimPreview.apply(cutscene, t, resolveInViewport)
 	self._lastMediaT = t
 end
 
