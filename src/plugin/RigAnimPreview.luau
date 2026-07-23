@@ -1,13 +1,16 @@
 --!strict
 -- RigAnimPreview — 编辑 scrub 时把 rigAnim 轨(Moon 关节动画)应用到场景 rig(20 spec)。
--- Motor6D.Transform 是运行时瞬态属性(不落盘),restore 归 identity 即干净。
+-- 编辑模式引擎不应用 Motor6D.Transform(实测拧了不动),必须改写 C0:
+-- 姿态 = C0 × Transform × C1⁻¹,故 C0' = 原C0 × transform 完全等价;
+-- restore 写回原 C0(有落盘风险,务必成对还原)。运行时 RigAnimTrack 仍走 Transform。
 
 local Sampler = require(script.Parent.Shared.Sampler)
 local CutsceneFormat = require(script.Parent.Shared.CutsceneFormat)
 
 local RigAnimPreview = {}
 
-local _touched: { [Motor6D]: boolean } = {}
+-- motor -> 首次触碰前的原 C0
+local _touched: { [Motor6D]: CFrame } = {}
 local _warnedJoint: { [string]: boolean } = {}
 
 local function pathTail(path: string): string
@@ -49,17 +52,21 @@ function RigAnimPreview.apply(
 			end
 			local cf = Sampler.sampleCFrame(jt.keyframes, t)
 			if cf then
-				_touched[motor] = true
-				motor.Transform = cf
+				local origC0 = _touched[motor]
+				if origC0 == nil then
+					origC0 = motor.C0
+					_touched[motor] = origC0
+				end
+				motor.C0 = origC0 * cf
 			end
 		end
 	end
 end
 
 function RigAnimPreview.restore()
-	for motor in _touched do
+	for motor, origC0 in _touched do
 		if motor.Parent then
-			motor.Transform = CFrame.identity
+			motor.C0 = origC0
 		end
 	end
 	table.clear(_touched)
