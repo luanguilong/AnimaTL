@@ -752,6 +752,33 @@ function EditorState.captureFrameNoUndo(self: EditorState, track: CutsceneFormat
 	self:commitTracks(true)
 end
 
+-- 粘贴 CFrame 关键帧(23 spec):带缓动/切线;同 t 覆盖(upsert)。
+function EditorState.pasteCFrameKeyframe(
+	self: EditorState,
+	track: CutsceneFormat.Track,
+	t: number,
+	value: CFrame,
+	easing: CutsceneFormat.EasingName?,
+	outTangent: Vector3?,
+	inTangent: Vector3?
+)
+	if track.kind ~= "camera" and track.kind ~= "cameraMove" and track.kind ~= "transform" then
+		return
+	end
+	self:pushUndo()
+	upsertKeyframe(track, t, value, easing)
+	if track.keyframes then
+		for _, k in track.keyframes do
+			if math.abs(k.t - t) < 1e-3 then
+				k.outTangent = outTangent
+				k.inTangent = inTangent
+				break
+			end
+		end
+	end
+	self:commitTracks(true)
+end
+
 -- 播放头是否落在两关键帧之间(贝塞尔段内插 K 用)。
 function EditorState.bracketKeyframeInterval(
 	track: CutsceneFormat.Track,
@@ -966,7 +993,8 @@ function EditorState.capturePropFrame(
 	self: EditorState,
 	track: CutsceneFormat.Track,
 	value: CutsceneFormat.PropValue?,
-	t: number?
+	t: number?,
+	easing: CutsceneFormat.EasingName?
 ): string?
 	if track.kind ~= "property" or not track.propertyName then
 		return "非属性轨"
@@ -980,7 +1008,7 @@ function EditorState.capturePropFrame(
 		v = read
 	end
 	self:pushUndo()
-	upsertPropKeyframe(track, t or self.currentTime:get(), v :: CutsceneFormat.PropValue, nil)
+	upsertPropKeyframe(track, t or self.currentTime:get(), v :: CutsceneFormat.PropValue, easing)
 	self:commitTracks(true)
 	return nil
 end
@@ -1462,7 +1490,8 @@ function EditorState.addEvent(
 	self: EditorState,
 	track: CutsceneFormat.Track,
 	name: string,
-	t: number?
+	t: number?,
+	payload: { [string]: any }?
 )
 	if track.kind ~= "event" then
 		return
@@ -1474,7 +1503,7 @@ function EditorState.addEvent(
 		track.events = events
 	end
 	assert(events, "events 初始化失败")
-	table.insert(events, { t = t or self.currentTime:get(), name = name })
+	table.insert(events, { t = t or self.currentTime:get(), name = name, payload = payload })
 	sortEvents(track)
 	self:commitTracks(true)
 end

@@ -477,6 +477,18 @@ local function cameraPathMenuItems(
 	return items
 end
 
+-- 关键帧剪贴板(23 spec):单槽;右键复制,轨道右键在类型兼容时出现"粘贴"。
+type KfClipboard = {
+	kind: "cframe" | "prop" | "event",
+	value: any?,
+	easing: CutsceneFormat.EasingName?,
+	outTangent: Vector3?,
+	inTangent: Vector3?,
+	name: string?,
+	payload: { [string]: any }?,
+}
+local _kfClipboard: KfClipboard? = nil
+
 -- 事件 payload ↔ 文本:`k=v; k2=v2`,值自动转型(number/true/false/string)。19 spec。
 local function payloadToText(payload: { [string]: any }): string
 	local keys = {}
@@ -769,6 +781,54 @@ local function showTrackMenu(
 				cb.onCaptureCameraTrack(track, atTime)
 			end,
 		})
+	end
+	-- 粘贴关键帧(23 spec):剪贴板与轨道类型兼容时出现
+	do
+		local clip = _kfClipboard
+		local pasteT = atTime or state.currentTime:get()
+		local compatible = clip ~= nil
+			and (
+				(clip.kind == "cframe" and (track.kind == "camera" or track.kind == "cameraMove" or track.kind == "transform"))
+				or (clip.kind == "prop" and track.kind == "property")
+				or (clip.kind == "event" and track.kind == "event")
+			)
+		if clip and compatible then
+			table.insert(items, {
+				text = string.format("📋 粘贴关键帧 @ %.2fs", pasteT),
+				onClick = function()
+					if clip.kind == "cframe" then
+						state:pasteCFrameKeyframe(
+							track,
+							pasteT,
+							clip.value :: CFrame,
+							clip.easing,
+							clip.outTangent,
+							clip.inTangent
+						)
+					elseif clip.kind == "prop" then
+						local kfs = track.propKeyframes
+						local sample = if kfs and kfs[1] then kfs[1].value else nil
+						if sample ~= nil and typeof(sample) ~= typeof(clip.value) then
+							warn(
+								`[anima] 粘贴取消:剪贴板值类型 {typeof(clip.value)} 与该轨 {typeof(sample)} 不符`
+							)
+							return
+						end
+						local err = state:capturePropFrame(track, clip.value, pasteT, clip.easing)
+						if err then
+							warn("[anima] 粘贴失败:" .. err)
+						end
+					elseif clip.kind == "event" and clip.name then
+						state:addEvent(
+							track,
+							clip.name,
+							pasteT,
+							if clip.payload then table.clone(clip.payload) else nil
+						)
+					end
+				end,
+			})
+		end
 	end
 	table.insert(items, { kind = "sep" })
 	table.insert(items, {
@@ -1390,6 +1450,20 @@ local function markDiamond(
 						state:duplicateKeyframe(track, kf)
 					end,
 				})
+				if kf.value then
+					table.insert(items, {
+						text = "复制到剪贴板",
+						onClick = function()
+							_kfClipboard = {
+								kind = "cframe",
+								value = kf.value,
+								easing = kf.easing,
+								outTangent = kf.outTangent,
+								inTangent = kf.inTangent,
+							}
+						end,
+					})
+				end
 				table.insert(items, { kind = "header", text = "缓动" })
 				for _, ez in Easing.names do
 					table.insert(items, {
@@ -1512,6 +1586,12 @@ local function propDiamond(
 						text = "复制(+0.5s)",
 						onClick = function()
 							state:duplicatePropKeyframe(track, kf)
+						end,
+					},
+					{
+						text = "复制到剪贴板",
+						onClick = function()
+							_kfClipboard = { kind = "prop", value = kf.value, easing = kf.easing }
 						end,
 					},
 				}
@@ -1932,6 +2012,16 @@ local function eventDiamond(
 									end
 								end,
 							})
+						end,
+					},
+					{
+						text = "复制到剪贴板",
+						onClick = function()
+							_kfClipboard = {
+								kind = "event",
+								name = ev.name,
+								payload = if ev.payload then table.clone(ev.payload) else nil,
+							}
 						end,
 					},
 					{
@@ -3343,13 +3433,10 @@ local function labelColumn(
 	gui: PluginGui,
 	state: EditorState.EditorState,
 	cb: Callbacks,
-	collapsed: Fusion.Value<{ [string]: boolean }>
+	collapsed: Fusion.Value<{ [string]: boolean }>,
+	vScroll: Fusion.Value<number>
 ): Instance
-	local rows = Computed(function()
-		state.revision:get()
-		local tracks = state.tracks:get()
-		local kids: { Instance } = {
-			e("Frame")({ -- 表头 + 加轨道
+	local headerBar = e("Frame")({ -- 表头 + 加轨道(固定,不随垂直滚动;23 spec)
 				BackgroundColor3 = Theme.color.panel,
 				BorderSizePixel = 0,
 				Size = UDim2.new(1, 0, 0, Theme.size.rulerHeight),
@@ -3407,8 +3494,11 @@ local function labelColumn(
 						addTrackBtn,
 					}
 				end)(),
-			}),
-		}
+	})
+	local rows = Computed(function()
+		state.revision:get()
+		local tracks = state.tracks:get()
+		local kids: { Instance } = {}
 		for i, row in buildDisplayRows(tracks, collapsed:get()) do
 			if row.kind == "header" then
 				table.insert(kids, labelHeaderRow(gui, state, cb, collapsed, row.group, i))
@@ -3506,11 +3596,20 @@ local function labelColumn(
 		end
 		return kids
 	end)
+	local offsetHolder = e("Frame")({
+		BackgroundTransparency = 1,
+		Size = UDim2.fromScale(1, 1),
+		Position = Computed(function()
+			return UDim2.fromOffset(0, -vScroll:get())
+		end),
+		[Children] = rows,
+	})
 
 	return e("Frame")({
 		BackgroundColor3 = Theme.color.panelAlt,
 		BorderSizePixel = 0,
 		Active = true,
+		ClipsDescendants = true,
 		Size = UDim2.new(0, Theme.size.labelWidth, 1, 0),
 		-- 轨道行/分组行的按钮会吃掉自己的右键;落到这里的都是空白处 → 新增轨道
 		[OnEvent("InputBegan")] = function(input: InputObject)
@@ -3523,7 +3622,14 @@ local function labelColumn(
 				end
 			end)
 		end,
-		[Children] = rows,
+		-- 左名列平滚轮 = 垂直滚动(时间轴侧滚轮=缩放,Shift+滚轮=垂直)
+		[OnEvent("InputChanged")] = function(input: InputObject)
+			if input.UserInputType == Enum.UserInputType.MouseWheel then
+				local step = Theme.size.trackHeight * 2
+				vScroll:set(math.max(0, vScroll:get() + (if input.Position.Z > 0 then -step else step)))
+			end
+		end,
+		[Children] = { offsetHolder, headerBar },
 	})
 end
 
@@ -3533,7 +3639,8 @@ local function timeline(
 	gui: PluginGui,
 	state: EditorState.EditorState,
 	cb: Callbacks,
-	collapsed: Fusion.Value<{ [string]: boolean }>
+	collapsed: Fusion.Value<{ [string]: boolean }>,
+	vScroll: Fusion.Value<number>
 ): Instance
 	-- contentArea 兼作"时间轴坐标 area",宽度 = zoom × 视口宽(套在横向 ScrollingFrame 里滚动)。
 	-- 关键帧/镜头/播放头作为其子级,按占时长比例定位,随缩放/滚动一起走。
@@ -3551,6 +3658,29 @@ local function timeline(
 	local canvasWidthPx = Computed(function()
 		local vw = math.max(viewportWidth:get(), 1)
 		return math.max(math.ceil(vw * zoom:get()), vw)
+	end)
+
+	-- 垂直滚动钳制(23 spec):maxV = 标尺高 + 行数×行高 - 视口高
+	local displayRowCount = Computed(function()
+		state.revision:get()
+		return #buildDisplayRows(state.tracks:get(), collapsed:get())
+	end)
+	local function clampVScroll()
+		local maxV = math.max(
+			0,
+			Theme.size.rulerHeight
+				+ displayRowCount:get() * Theme.size.trackHeight
+				- math.max(viewportHeight:get(), 1)
+		)
+		local v = vScroll:get()
+		local c = math.clamp(v, 0, maxV)
+		if c ~= v then
+			vScroll:set(c)
+		end
+	end
+	Fusion.Observer(vScroll):onChange(clampVScroll)
+	Fusion.Observer(displayRowCount):onChange(function()
+		task.defer(clampVScroll)
 	end)
 
 	local function maxCanvasScrollX(): number
@@ -3588,7 +3718,7 @@ local function timeline(
 	local rows = Computed(function()
 		state.revision:get()
 		local tracks = state.tracks:get()
-		local kids: { Instance } = { ruler(gui, state, area, areaWidth) }
+		local kids: { Instance } = {}
 		for i, row in buildDisplayRows(tracks, collapsed:get()) do
 			if row.kind == "header" then
 				table.insert(
@@ -3627,7 +3757,18 @@ local function timeline(
 	local rowsHolder = e("Frame")({
 		BackgroundTransparency = 1,
 		Size = UDim2.fromScale(1, 1),
+		Position = Computed(function()
+			return UDim2.fromOffset(0, -vScroll:get())
+		end),
 		[Children] = rows,
+	})
+	-- 标尺固定在顶部,不透明底罩住滚上来的行(23 spec)
+	local rulerHolder = e("Frame")({
+		BackgroundColor3 = Theme.color.panel,
+		BorderSizePixel = 0,
+		Size = UDim2.new(1, 0, 0, Theme.size.rulerHeight),
+		ZIndex = 20,
+		[Children] = ruler(gui, state, area, areaWidth),
 	})
 	-- 竖向网格线:主刻度延伸到轨道区,随缩放自适应(和 ruler 用同一套步长)。
 	local gridLines = Computed(function()
@@ -3683,7 +3824,7 @@ local function timeline(
 				end
 			end)
 		end,
-		[Children] = { rowsHolder, gridHolder, playhead },
+		[Children] = { rowsHolder, gridHolder, playhead, rulerHolder },
 	})
 	scroller = e("ScrollingFrame")({
 		BackgroundTransparency = 1,
@@ -3704,6 +3845,13 @@ local function timeline(
 		-- 挂在 scroller 上一处搞定:指针落在任何子级内时它同样收到 InputChanged。
 		[OnEvent("InputChanged")] = function(input: InputObject)
 			if input.UserInputType == Enum.UserInputType.MouseWheel then
+				if modifierShiftDown() then
+					local step = Theme.size.trackHeight * 2
+					vScroll:set(
+						math.max(0, vScroll:get() + (if input.Position.Z > 0 then -step else step))
+					)
+					return
+				end
 				local factor = if input.Position.Z > 0 then 1.25 else 1 / 1.25
 				zoomAt(factor, gui:GetRelativeMousePosition().X)
 			end
@@ -3718,6 +3866,7 @@ local function timeline(
 			areaWidth:set(contentArea.AbsoluteSize.X)
 		end
 		task.defer(clampCanvasScroll)
+		task.defer(clampVScroll)
 	end
 	scroller:GetPropertyChangedSignal("AbsoluteSize"):Connect(syncTimelineViewport)
 	contentArea:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
@@ -3842,6 +3991,9 @@ function App.mount(
 		[Children] = vcamBar(gui, state, cb),
 	})
 
+	-- 轨道区垂直滚动偏移(左名列与时间轴共享;23 spec)
+	local vScroll = Fusion.Value(0)
+
 	local body = e("Frame")({
 		Name = "Body",
 		BackgroundColor3 = Theme.color.bg,
@@ -3853,8 +4005,8 @@ function App.mount(
 			return UDim2.new(1, 0, 1, -(Theme.size.topbar + previewH() + Theme.size.vcamBar))
 		end),
 		[Children] = {
-			labelColumn(gui, state, cb, collapsed),
-			timeline(gui, state, cb, collapsed),
+			labelColumn(gui, state, cb, collapsed, vScroll),
+			timeline(gui, state, cb, collapsed, vScroll),
 		},
 	})
 
