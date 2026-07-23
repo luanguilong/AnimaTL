@@ -40,6 +40,76 @@ local fns: { [string]: EasingFn } = {
 	sine = function(a)
 		return -(math.cos(math.pi * a) - 1) / 2
 	end,
+	-- T5 扩展档(21 spec):Expo / Back / Elastic / Bounce
+	expoIn = function(a)
+		return if a == 0 then 0 else 2 ^ (10 * a - 10)
+	end,
+	expoOut = function(a)
+		return if a == 1 then 1 else 1 - 2 ^ (-10 * a)
+	end,
+	expoInOut = function(a)
+		if a == 0 or a == 1 then
+			return a
+		end
+		if a < 0.5 then
+			return 2 ^ (20 * a - 10) / 2
+		end
+		return (2 - 2 ^ (-20 * a + 10)) / 2
+	end,
+	backIn = function(a)
+		local c = 1.70158
+		return (c + 1) * a * a * a - c * a * a
+	end,
+	backOut = function(a)
+		local c = 1.70158
+		local b = a - 1
+		return 1 + (c + 1) * b * b * b + c * b * b
+	end,
+	backInOut = function(a)
+		local c = 1.70158 * 1.525
+		if a < 0.5 then
+			return ((2 * a) ^ 2 * ((c + 1) * 2 * a - c)) / 2
+		end
+		return ((2 * a - 2) ^ 2 * ((c + 1) * (2 * a - 2) + c) + 2) / 2
+	end,
+	elasticOut = function(a)
+		if a == 0 or a == 1 then
+			return a
+		end
+		return 2 ^ (-10 * a) * math.sin((a * 10 - 0.75) * (2 * math.pi / 3)) + 1
+	end,
+	bounceOut = function(a)
+		local n, d = 7.5625, 2.75
+		if a < 1 / d then
+			return n * a * a
+		elseif a < 2 / d then
+			a -= 1.5 / d
+			return n * a * a + 0.75
+		elseif a < 2.5 / d then
+			a -= 2.25 / d
+			return n * a * a + 0.9375
+		end
+		a -= 2.625 / d
+		return n * a * a + 0.984375
+	end,
+}
+
+-- 菜单/映射共用的全量名单(顺序即 UI 展示顺序)。
+Easing.names = {
+	"linear",
+	"quadIn",
+	"quadOut",
+	"quadInOut",
+	"cubicInOut",
+	"sine",
+	"expoIn",
+	"expoOut",
+	"expoInOut",
+	"backIn",
+	"backOut",
+	"backInOut",
+	"elasticOut",
+	"bounceOut",
 }
 
 -- 取缓动函数;未知名回退 linear。

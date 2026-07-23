@@ -79,7 +79,7 @@ function MoonImport.findSaves(): { StringValue }
 	return out
 end
 
--- MA2 缓动 → anima Easing 名(linear/quadIn/quadOut/quadInOut/cubicInOut/sine)
+-- MA2 缓动 → anima Easing 名(T5 后覆盖 Expo/Back/Elastic/Bounce)
 local function mapEase(easeType: string?, direction: string?): string?
 	if easeType == nil or easeType == "Linear" then
 		return nil -- 缺省线性
@@ -95,7 +95,29 @@ local function mapEase(easeType: string?, direction: string?): string?
 		end
 		return "quadInOut"
 	end
-	-- Cubic/Quart/Quint/Expo/Back/Elastic… anima 暂无同款,用最接近的平滑档
+	if easeType == "Expo" then
+		if direction == "In" then
+			return "expoIn"
+		elseif direction == "Out" then
+			return "expoOut"
+		end
+		return "expoInOut"
+	end
+	if easeType == "Back" then
+		if direction == "In" then
+			return "backIn"
+		elseif direction == "Out" then
+			return "backOut"
+		end
+		return "backInOut"
+	end
+	if easeType == "Elastic" then
+		return "elasticOut"
+	end
+	if easeType == "Bounce" then
+		return "bounceOut"
+	end
+	-- Cubic/Quart/Quint… 用最接近的平滑档
 	return "cubicInOut"
 end
 

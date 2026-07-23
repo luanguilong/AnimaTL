@@ -29,8 +29,22 @@ export type TrackKind =
 -- 数据契约版本(17 spec):无 formatVersion 字段的旧数据视为 1;property 轨落地起为 2。
 CutsceneFormat.FORMAT_VERSION = 2
 
--- 缓动名(见 Easing.luau)
-export type EasingName = "linear" | "quadIn" | "quadOut" | "quadInOut" | "cubicInOut" | "sine"
+-- 缓动名(见 Easing.luau;T5/21 spec 扩展 Expo/Back/Elastic/Bounce)
+export type EasingName =
+	"linear"
+	| "quadIn"
+	| "quadOut"
+	| "quadInOut"
+	| "cubicInOut"
+	| "sine"
+	| "expoIn"
+	| "expoOut"
+	| "expoInOut"
+	| "backIn"
+	| "backOut"
+	| "backInOut"
+	| "elasticOut"
+	| "bounceOut"
 
 -- 相机 / cameraMove 轨路径插值(07 spec);缺省 linear。legacy smooth 仍可用 Catmull-Rom。
 export type PathMode = "linear" | "bezier"

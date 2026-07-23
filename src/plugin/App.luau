@@ -24,6 +24,7 @@ local CutsceneFormat = require(script.Parent.Shared.CutsceneFormat)
 local VCam = require(script.Parent.Shared.VCam)
 local TimelineUnity = require(script.Parent.TimelineUnity)
 local AnimationAsset = require(script.Parent.AnimationAsset)
+local Easing = require(script.Parent.Shared.Easing)
 local OverlayHost = require(script.Parent.OverlayHost)
 local BindingDrop = require(script.Parent.BindingDrop)
 local BindingFromInstance = require(script.Parent.BindingFromInstance)
@@ -1390,7 +1391,7 @@ local function markDiamond(
 					end,
 				})
 				table.insert(items, { kind = "header", text = "缓动" })
-				for _, ez in { "linear", "quadIn", "quadOut", "quadInOut", "cubicInOut", "sine" } do
+				for _, ez in Easing.names do
 					table.insert(items, {
 						text = "  " .. ez,
 						onClick = function()
@@ -1516,7 +1517,7 @@ local function propDiamond(
 				}
 				if CutsceneFormat.propValueLerpable(kf.value) then
 					table.insert(items, { kind = "header", text = "缓动" })
-					for _, ez in { "linear", "quadIn", "quadOut", "quadInOut", "cubicInOut", "sine" } do
+					for _, ez in Easing.names do
 						table.insert(items, {
 							text = "  " .. ez,
 							onClick = function()
