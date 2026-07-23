@@ -400,6 +400,157 @@ local function promptExportToPlace(gui: PluginGui)
 	})
 end
 
+--========================= 美术零代码工作流(📂 菜单) =========================--
+
+local PLAY_KEY_DIGITS: { [string]: string } = {
+	["0"] = "Zero",
+	["1"] = "One",
+	["2"] = "Two",
+	["3"] = "Three",
+	["4"] = "Four",
+	["5"] = "Five",
+	["6"] = "Six",
+	["7"] = "Seven",
+	["8"] = "Eight",
+	["9"] = "Nine",
+}
+
+-- 文本 → KeyCode 名("1"→"One","v"→"V");无效返回 nil。
+local function parsePlayKeyName(raw: string): string?
+	local trimmed = (raw:gsub("^%s+", ""):gsub("%s+$", ""))
+	if trimmed == "" then
+		return nil
+	end
+	local name = PLAY_KEY_DIGITS[trimmed] or (trimmed:sub(1, 1):upper() .. trimmed:sub(2))
+	local ok, kc = pcall(function()
+		return (Enum.KeyCode :: any)[name]
+	end)
+	if ok and typeof(kc) == "EnumItem" then
+		return (kc :: Enum.KeyCode).Name
+	end
+	return nil
+end
+
+-- 🚀 把插件自带的 Runtime/Shared 模块 + 按键播放脚本写入本 place(零命令栏)。
+local function deployRuntimeToGame()
+	local anima = ReplicatedStorage:FindFirstChild("Anima")
+	if not anima then
+		local f = Instance.new("Folder")
+		f.Name = "Anima"
+		f.Parent = ReplicatedStorage
+		anima = f
+	end
+	assert(anima, "Anima folder")
+	local count = 0
+	for _, folderName in { "Runtime", "Shared" } do
+		local srcFolder = script:FindFirstChild(folderName)
+		if not srcFolder then
+			continue
+		end
+		local dst = anima:FindFirstChild(folderName)
+		if not dst then
+			local f = Instance.new("Folder")
+			f.Name = folderName
+			f.Parent = anima
+			dst = f
+		end
+		assert(dst, "dst folder")
+		for _, m in srcFolder:GetChildren() do
+			if m:IsA("ModuleScript") then
+				local target = dst:FindFirstChild(m.Name)
+				if not target or not target:IsA("ModuleScript") then
+					if target then
+						target:Destroy()
+					end
+					local t = Instance.new("ModuleScript")
+					t.Name = m.Name
+					t.Parent = dst
+					target = t
+				end
+				(target :: ModuleScript).Source = m.Source
+				count += 1
+			end
+		end
+	end
+
+	local clientDeployed = false
+	local template = script:FindFirstChild("ClientTemplate")
+	local tpl = template and template:FindFirstChild("AnimaBootstrap")
+	if tpl and (tpl:IsA("LocalScript") or tpl:IsA("ModuleScript")) then
+		local sps = game:GetService("StarterPlayer"):FindFirstChild("StarterPlayerScripts")
+		if sps then
+			local holder = sps:FindFirstChild("AnimaClient")
+			if not holder then
+				local f = Instance.new("Folder")
+				f.Name = "AnimaClient"
+				f.Parent = sps
+				holder = f
+			end
+			assert(holder, "AnimaClient folder")
+			local ls = holder:FindFirstChild("AnimaBootstrap")
+			if not ls or not ls:IsA("LocalScript") then
+				if ls then
+					ls:Destroy()
+				end
+				local l = Instance.new("LocalScript")
+				l.Name = "AnimaBootstrap"
+				l.Parent = holder
+				ls = l
+			end
+			(ls :: LocalScript).Source = (tpl :: any).Source
+			clientDeployed = true
+		end
+	end
+	print(
+		`[anima] 🚀 运行时已部署到本游戏:{count} 个模块`
+			.. (if clientDeployed then " + 按键播放脚本。F5 后按绑定键即播。" else "")
+	)
+end
+
+-- ⌨ 给过场绑播放按键(写 Attribute `AnimaPlayKey`,进游戏自动生效)。
+local function showBindKeyMenu(gui: PluginGui)
+	local items: { ContextMenu.Item } = {
+		{ kind = "header", text = "选过场 → 输入按键(如 1 / V / F)" },
+	}
+	local entries = CutsceneBrowser.list()
+	if #entries == 0 then
+		table.insert(items, { text = "(先 💾 导出过场)", color = Theme.color.textDim })
+	end
+	for i, entry in entries do
+		if i > 12 then
+			break
+		end
+		local cur = entry.module:GetAttribute("AnimaPlayKey")
+		local curText = if typeof(cur) == "string" and cur ~= "" then `(当前 {cur})` else ""
+		table.insert(items, {
+			text = "⌨ " .. entry.path .. curText,
+			onClick = function()
+				InputPrompt.show(gui, {
+					title = `'{entry.path}' 的播放按键(留空 = 清除)`,
+					placeholder = "如 1 / V / F",
+					default = if typeof(cur) == "string" then cur else "",
+					onSubmit = function(txt)
+						local trimmed = (txt:gsub("^%s+", ""):gsub("%s+$", ""))
+						if trimmed == "" then
+							entry.module:SetAttribute("AnimaPlayKey", nil)
+							print(`[anima] 已清除 '{entry.path}' 的播放按键`)
+							return
+						end
+						local keyName = parsePlayKeyName(trimmed)
+						if not keyName then
+							warn(`[anima] 按键 '{txt}' 无法识别(试试 1 / V / F 这类)`)
+							return
+						end
+						entry.module:SetAttribute("AnimaPlayKey", keyName)
+						print(`[anima] ⌨ '{entry.path}' → 按 {keyName} 播放(F5 生效)`)
+					end,
+				})
+			end,
+		})
+	end
+	ContextMenu.show(gui, items)
+end
+
 local callbacks: App.Callbacks = {
 	isPlaying = playback.isPlaying,
 	loop = playback.loop,
@@ -564,6 +715,19 @@ local callbacks: App.Callbacks = {
 				end,
 			})
 		end
+		-- 美术一条龙:绑按键 + 一键部署(零代码)
+		table.insert(items, { kind = "sep" })
+		table.insert(items, { kind = "header", text = "游戏运行" })
+		table.insert(items, {
+			text = "⌨ 绑定播放按键…",
+			onClick = function()
+				showBindKeyMenu(gui)
+			end,
+		})
+		table.insert(items, {
+			text = "🚀 部署运行时到本游戏(F5 可播)",
+			onClick = deployRuntimeToGame,
+		})
 		-- Moon Animator 2 存档:提取相机轨(CFrame 关键帧+缓动+首帧 FOV)追加为独立相机轨
 		local moonSaves = MoonImport.findSaves()
 		if #moonSaves > 0 then

@@ -8,6 +8,9 @@
     "Runtime": {
       "$path": "src/runtime"
     },
+    "ClientTemplate": {
+      "$path": "src/client"
+    },
     "Packages": {
       "$path": "Packages"
     }
