@@ -17,7 +17,9 @@ local function warnMissingOnce(track: CutsceneFormat.Track)
 		return
 	end
 	_warnedKeys[key] = true
-	warn(`[anima] 相机轨跟随:无法解析锚点 binding='{binding}' part='{partPath}',关键帧按世界 CFrame 求值`)
+	warn(
+		`[anima] 相机轨跟随:无法解析锚点 binding='{binding}' part='{partPath}',关键帧按世界 CFrame 求值`
+	)
 end
 
 local function nodeCFrame(node: Instance): CFrame?
@@ -91,7 +93,11 @@ function FollowAnchor.storeKeyframeCFrame(
 	if not FollowAnchor.hasFollowBinding(track) or not resolveBinding then
 		return worldCf
 	end
-	local anchor = FollowAnchor.resolveFollowAnchor(track.followBinding :: string, track.followPart, resolveBinding)
+	local anchor = FollowAnchor.resolveFollowAnchor(
+		track.followBinding :: string,
+		track.followPart,
+		resolveBinding
+	)
 	if anchor then
 		return anchor:ToObjectSpace(worldCf)
 	end
@@ -107,7 +113,11 @@ function FollowAnchor.worldFromKeyframeCFrame(
 	if not FollowAnchor.hasFollowBinding(track) or not resolveBinding then
 		return storedCf
 	end
-	local anchor = FollowAnchor.resolveFollowAnchor(track.followBinding :: string, track.followPart, resolveBinding)
+	local anchor = FollowAnchor.resolveFollowAnchor(
+		track.followBinding :: string,
+		track.followPart,
+		resolveBinding
+	)
 	if anchor then
 		return anchor * storedCf
 	end
@@ -124,7 +134,11 @@ function FollowAnchor.worldDeltaToStoredOffset(
 	if not FollowAnchor.hasFollowBinding(track) or not resolveBinding then
 		return worldDelta
 	end
-	local anchor = FollowAnchor.resolveFollowAnchor(track.followBinding :: string, track.followPart, resolveBinding)
+	local anchor = FollowAnchor.resolveFollowAnchor(
+		track.followBinding :: string,
+		track.followPart,
+		resolveBinding
+	)
 	if anchor then
 		return anchor:VectorToObjectSpace(worldDelta)
 	end
@@ -139,7 +153,11 @@ function FollowAnchor.storedOffsetToWorldDelta(
 	if not FollowAnchor.hasFollowBinding(track) or not resolveBinding then
 		return storedOffset
 	end
-	local anchor = FollowAnchor.resolveFollowAnchor(track.followBinding :: string, track.followPart, resolveBinding)
+	local anchor = FollowAnchor.resolveFollowAnchor(
+		track.followBinding :: string,
+		track.followPart,
+		resolveBinding
+	)
 	if anchor then
 		return anchor:VectorToWorldSpace(storedOffset)
 	end

@@ -77,7 +77,9 @@ function BindingDrop.bindFromSelectionOrPick(_gui: PluginGui, onInstance: (Insta
 		onInstance(sel[1])
 		return
 	end
-	print("[anima] 请在 Explorer 或视口中选中一个对象(Part/Model/Attachment),将自动绑定")
+	print(
+		"[anima] 请在 Explorer 或视口中选中一个对象(Part/Model/Attachment),将自动绑定"
+	)
 	local conn: RBXScriptConnection?
 	conn = Selection.SelectionChanged:Connect(function()
 		local s = Selection:Get()

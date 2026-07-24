@@ -192,7 +192,11 @@ end
 -- Duration 内从当前值 tween 过去,ResetOnFinish(缺省 true)结束还原。
 -- 震屏(CameraShake)与随机器不做编辑期预览。
 function ForgeApproxFx.emitTweener(rv: RayValue, opts: EmitOpts)
-	if rv:HasTag("CameraShake") or rv:HasTag("PropertyRandomizer") or rv:HasTag("AttributeRandomizer") then
+	if
+		rv:HasTag("CameraShake")
+		or rv:HasTag("PropertyRandomizer")
+		or rv:HasTag("AttributeRandomizer")
+	then
 		return
 	end
 	local isAttribute = rv:HasTag("AttributeTweener")
@@ -391,7 +395,10 @@ function ForgeApproxFx.simulateEmitterBurst(emitter: ParticleEmitter, count: num
 
 	local sprites: { Sprite } = {}
 	for _ = 1, count do
-		local life = math.max(0.05, emitter.Lifetime.Min + math.random() * (emitter.Lifetime.Max - emitter.Lifetime.Min))
+		local life = math.max(
+			0.05,
+			emitter.Lifetime.Min + math.random() * (emitter.Lifetime.Max - emitter.Lifetime.Min)
+		)
 		local speed = emitter.Speed.Min + math.random() * (emitter.Speed.Max - emitter.Speed.Min)
 		local spread = CFrame.fromOrientation(
 			(math.random() * 2 - 1) * spreadX,

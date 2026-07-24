@@ -53,7 +53,9 @@ function RigAnimTrack.new(track: CutsceneFormat.Track, target: Instance): RigAni
 		if motor then
 			table.insert(joints, { motor = motor, keyframes = jt.keyframes })
 		else
-			warn(`[anima] rigAnim:'{target.Name}' 内找不到关节 '{jt.path}'(按 Part1 名匹配),跳过`)
+			warn(
+				`[anima] rigAnim:'{target.Name}' 内找不到关节 '{jt.path}'(按 Part1 名匹配),跳过`
+			)
 		end
 	end
 	if #joints == 0 then

@@ -75,7 +75,8 @@ function DragController.begin(gui: PluginGui, handlers: Handlers): () -> ()
 			feedback.BackgroundTransparency = feedbackBaseTransparency
 			return
 		end
-		feedback.BackgroundTransparency = math.clamp(feedbackBaseTransparency - progress * 0.35, 0, 1)
+		feedback.BackgroundTransparency =
+			math.clamp(feedbackBaseTransparency - progress * 0.35, 0, 1)
 	end
 
 	local function destroyOverlay()
@@ -286,10 +287,13 @@ function DragController.begin(gui: PluginGui, handlers: Handlers): () -> ()
 			end
 		end)
 	)
-	table.insert(conns, gui.WindowFocusReleased:Connect(function()
-		buttonHeld = false
-		cancel()
-	end))
+	table.insert(
+		conns,
+		gui.WindowFocusReleased:Connect(function()
+			buttonHeld = false
+			cancel()
+		end)
+	)
 
 	return stop
 end

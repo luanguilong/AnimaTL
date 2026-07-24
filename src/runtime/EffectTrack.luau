@@ -98,7 +98,11 @@ function EffectTrack.particleHandler(cue: CutsceneFormat.EffectCue, target: Inst
 		emitOnTarget(target, cue.templateName, emitCount)
 		return nil
 	end
-	if cue.particleAssetId and cue.particleAssetId ~= "" and cue.particleAssetId ~= "rbxassetid://0" then
+	if
+		cue.particleAssetId
+		and cue.particleAssetId ~= ""
+		and cue.particleAssetId ~= "rbxassetid://0"
+	then
 		local id = normalizeAssetId(cue.particleAssetId)
 		local ok, asset = pcall(function()
 			return InsertService:LoadAsset(tonumber(id:match("%d+")) or 0)
@@ -407,7 +411,9 @@ function EffectTrack.tryOfficialForgeEmit(
 			local okEmit, result = ForgeEffectPlay.emitOnRoot(api, root, scale)
 			if okEmit then
 				ForgeEffectPlay.registerClear(track._forgeClears, result)
-				print(`[anima] forge emit @ {string.format("%.2f", cue.t)}s · {root:GetFullName()}`)
+				print(
+					`[anima] forge emit @ {string.format("%.2f", cue.t)}s · {root:GetFullName()}`
+				)
 			else
 				warn(`[anima] EffectTrack:forge emit 失败 · {root:GetFullName()}`)
 			end
@@ -425,7 +431,11 @@ function EffectTrack.tryOfficialForgeEmit(
 	return true
 end
 
-function EffectTrack.runForgeEditorPreview(track: EffectTrack, cue: CutsceneFormat.EffectCue, target: Instance?)
+function EffectTrack.runForgeEditorPreview(
+	track: EffectTrack,
+	cue: CutsceneFormat.EffectCue,
+	target: Instance?
+)
 	if EffectTrack.tryOfficialForgeEmit(track, cue, target, nil) then
 		return
 	end
@@ -468,7 +478,9 @@ function EffectTrack.runForgeEditorPreview(track: EffectTrack, cue: CutsceneForm
 				end
 				forgeEditorBurstOnRoot(track, root, emitCount)
 				viewportForgeFlash(root)
-				print(`[anima] forge 近似预览 @ {string.format("%.2f", cue.t)}s · {root:GetFullName()}`)
+				print(
+					`[anima] forge 近似预览 @ {string.format("%.2f", cue.t)}s · {root:GetFullName()}`
+				)
 				if ViewportFxFeedback and track._viewportFrame then
 					ViewportFxFeedback.pulse(track._viewportFrame)
 				end
@@ -542,7 +554,9 @@ function EffectTrack.buildDefaultHandler(
 		if not ForgeEffectPlay.resolveApi(mod) then
 			if not warnedNoForge then
 				warnedNoForge = true
-				warn("[anima] EffectTrack:forge cue 需要 ReplicatedStorage.ForgeVFX 或 CutscenePlayer.forgeVfxModule")
+				warn(
+					"[anima] EffectTrack:forge cue 需要 ReplicatedStorage.ForgeVFX 或 CutscenePlayer.forgeVfxModule"
+				)
 			end
 			return nil
 		end

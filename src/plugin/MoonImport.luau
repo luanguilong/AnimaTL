@@ -217,7 +217,10 @@ end
 -- 读一个 _joint:返回 (关节路径, Transform 关键帧)。
 -- 数学(spike 已验证,同 Moonlite):Transform = 帧值:Inverse() × default;
 -- 关键帧包可跨多帧:Values.N = 包首帧 + N。烘焙数据逐帧一值,缓动按 linear。
-local function readJointTrack(jointFolder: Instance, fps: number): (string?, { CutsceneFormat.Keyframe }?)
+local function readJointTrack(
+	jointFolder: Instance,
+	fps: number
+): (string?, { CutsceneFormat.Keyframe }?)
 	local hier = jointFolder:FindFirstChild("_hier")
 	local def = jointFolder:FindFirstChild("default")
 	local kfs = jointFolder:FindFirstChild("_keyframes")

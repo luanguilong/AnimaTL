@@ -74,7 +74,10 @@ local function resetPreviewTracks(
 		end
 		if track.kind == "sound" then
 			local target = resolveBinding(track.target)
-			table.insert(ctx.previewSoundTracks, SoundTrack.new(track, target, SoundTrack.defaultHandler))
+			table.insert(
+				ctx.previewSoundTracks,
+				SoundTrack.new(track, target, SoundTrack.defaultHandler)
+			)
 		elseif track.kind == "effect" then
 			local target = resolveBinding(track.target)
 			local mirror = if options and options.workspaceResolve
@@ -105,7 +108,11 @@ function MediaPreview.step(
 	local ctx = getContext(contextId or "workspace")
 	local resolveFn = resolveBinding or SceneResolver.resolve
 
-	if options and options.cutsceneRevision and ctx.cutsceneRevision ~= options.cutsceneRevision then
+	if
+		options
+		and options.cutsceneRevision
+		and ctx.cutsceneRevision ~= options.cutsceneRevision
+	then
 		for _, ft in ctx.previewEffectTracks do
 			ft:stop()
 		end

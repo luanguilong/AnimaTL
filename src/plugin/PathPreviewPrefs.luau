@@ -59,7 +59,9 @@ function PathPreviewPrefs.load(plugin: { GetSetting: (self: any, key: string) ->
 	end
 	return clampPrefs({
 		mode = mode,
-		fixedSegments = if type(raw.fixedSegments) == "number" then raw.fixedSegments else DEFAULT.fixedSegments,
+		fixedSegments = if type(raw.fixedSegments) == "number"
+			then raw.fixedSegments
+			else DEFAULT.fixedSegments,
 		scale = if type(raw.scale) == "number" then raw.scale else DEFAULT.scale,
 	})
 end
@@ -71,7 +73,11 @@ function PathPreviewPrefs.save(
 	plugin:SetSetting(SETTING_KEY, clampPrefs(prefs))
 end
 
-function PathPreviewPrefs.sampleCountForSpan(spanSec: number, sampleStep: number, prefs: Prefs?): number
+function PathPreviewPrefs.sampleCountForSpan(
+	spanSec: number,
+	sampleStep: number,
+	prefs: Prefs?
+): number
 	local step = math.max(sampleStep, 1e-6)
 	local span = math.max(spanSec, 0)
 	local autoN = math.clamp(math.floor(span / step), 1, MAX_SEG)
@@ -107,7 +113,10 @@ end
 
 function PathPreviewPrefs.menuItems(
 	gui: PluginGui,
-	plugin: { GetSetting: (self: any, key: string) -> any, SetSetting: (self: any, key: string, value: any) -> () },
+	plugin: {
+		GetSetting: (self: any, key: string) -> any,
+		SetSetting: (self: any, key: string, value: any) -> (),
+	},
 	onChanged: () -> ()
 ): { ContextMenu.Item }
 	local cur = PathPreviewPrefs.load(plugin)
@@ -116,7 +125,11 @@ function PathPreviewPrefs.menuItems(
 		{
 			text = if cur.mode == "auto" then "✓ 自动" else "  自动",
 			onClick = function()
-				PathPreviewPrefs.apply(plugin, { mode = "auto", fixedSegments = cur.fixedSegments, scale = cur.scale }, onChanged)
+				PathPreviewPrefs.apply(
+					plugin,
+					{ mode = "auto", fixedSegments = cur.fixedSegments, scale = cur.scale },
+					onChanged
+				)
 			end,
 		},
 		{ kind = "sep" },
@@ -179,7 +192,10 @@ end
 
 function PathPreviewPrefs.showContextMenu(
 	gui: PluginGui,
-	plugin: { GetSetting: (self: any, key: string) -> any, SetSetting: (self: any, key: string, value: any) -> () },
+	plugin: {
+		GetSetting: (self: any, key: string) -> any,
+		SetSetting: (self: any, key: string, value: any) -> (),
+	},
 	onChanged: () -> ()
 )
 	ContextMenu.show(gui, PathPreviewPrefs.menuItems(gui, plugin, onChanged))

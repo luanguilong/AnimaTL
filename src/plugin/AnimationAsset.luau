@@ -64,7 +64,9 @@ function AnimationAsset.resolveSourceLength(animationId: string, opts: ResolveOp
 
 	local model = if opts and opts.model then opts.model else findHumanoidModel(preferRig)
 	if not model then
-		warn("[anima] 无法解析动画长度:场景中没有带 Humanoid 的 Model,请先放入角色或选中 Rig")
+		warn(
+			"[anima] 无法解析动画长度:场景中没有带 Humanoid 的 Model,请先放入角色或选中 Rig"
+		)
 		return nil
 	end
 	local hum = model:FindFirstChildOfClass("Humanoid")
@@ -131,10 +133,7 @@ local _prefetching = false
 
 -- 后台解析过场里所有 clip 的源时长(缓存命中/无效 id 跳过)。
 -- 有任何新解析成功时调用一次 onResolved(调用方借此重绘时间轴宽度)。
-function AnimationAsset.prefetchCutscene(
-	cutscene: CutsceneFormat.Cutscene,
-	onResolved: (() -> ())?
-)
+function AnimationAsset.prefetchCutscene(cutscene: CutsceneFormat.Cutscene, onResolved: (() -> ())?)
 	if _prefetching then
 		return
 	end

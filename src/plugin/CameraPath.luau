@@ -235,7 +235,8 @@ local function controlWorld(
 ): (Vector3, Vector3)
 	local worldAnchor = FollowAnchor.worldFromKeyframeCFrame(track, storedCf, resolveBinding)
 	local p0 = worldAnchor.Position
-	local delta = FollowAnchor.storedOffsetToWorldDelta(track, storedOffset or Vector3.zero, resolveBinding)
+	local delta =
+		FollowAnchor.storedOffsetToWorldDelta(track, storedOffset or Vector3.zero, resolveBinding)
 	return p0, p0 + delta
 end
 
@@ -410,7 +411,8 @@ function CameraPath.rebuild(
 							pos = outPos,
 							color = COLOR_TANGENT_OUT,
 						})
-						local _, inPos = controlWorld(track, kf.value, kf.inTangent, SceneResolver.resolve)
+						local _, inPos =
+							controlWorld(track, kf.value, kf.inTangent, SceneResolver.resolve)
 						connect(self.tangentArms, anchorPos, inPos, COLOR_TANGENT_ARM)
 						table.insert(tanWanted, {
 							track = track,
