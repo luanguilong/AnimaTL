@@ -3948,7 +3948,10 @@ local function labelHeaderRow(
 				e("TextButton")({
 					BackgroundTransparency = 1,
 					Size = UDim2.new(1, -22, 1, 0),
-					Text = (if isCollapsed then "▸ " else "▾ ") .. "轨道组 · " .. group,
+					Text = (if isCollapsed then "▸ " else "▾ ")
+						.. "轨道组 · "
+						.. group
+						.. (if state:isGroupHidden(group) then "(已隐藏)" else ""),
 					TextColor3 = Theme.color.text,
 					TextXAlignment = Enum.TextXAlignment.Left,
 					TextTruncate = Enum.TextTruncate.AtEnd,
@@ -3958,8 +3961,17 @@ local function labelHeaderRow(
 						toggleCollapse(collapsed, group)
 					end,
 					[OnEvent("MouseButton2Click")] = function()
+						local groupHidden = state:isGroupHidden(group)
 						ContextMenu.show(gui, {
 							{ kind = "header", text = "分组 " .. group },
+							{
+								text = if groupHidden
+									then "👁 显示整组"
+									else "🙈 隐藏整组(预览/播放跳过)",
+								onClick = function()
+									state:setGroupHidden(group, not groupHidden)
+								end,
+							},
 							{
 								text = "改名…",
 								onClick = function()

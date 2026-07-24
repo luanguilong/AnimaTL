@@ -571,6 +571,32 @@ function EditorState.removeGroup(self: EditorState, group: string)
 	self:commitTracks(true)
 end
 
+-- 整组隐藏/显示(24 spec):批量翻子轨 hidden,一步撤销。不引入组级契约字段——
+-- 运行时/预览/导出本来就尊重 track.hidden。
+function EditorState.setGroupHidden(self: EditorState, group: string, hidden: boolean)
+	self:pushUndo()
+	for _, tr in self.tracks:get() do
+		if (tr.group or "") == group then
+			tr.hidden = if hidden then true else nil
+		end
+	end
+	self:commitTracks(true)
+end
+
+-- 组内是否全部隐藏(空组视为 false)。
+function EditorState.isGroupHidden(self: EditorState, group: string): boolean
+	local any = false
+	for _, tr in self.tracks:get() do
+		if (tr.group or "") == group then
+			any = true
+			if not tr.hidden then
+				return false
+			end
+		end
+	end
+	return any
+end
+
 -- 分组改名(改其下所有轨道的 group)。
 function EditorState.renameGroup(self: EditorState, old: string, new: string)
 	self:pushUndo()

@@ -29,6 +29,7 @@ local EditorPersistence = require(script.EditorPersistence)
 local InputPrompt = require(script.InputPrompt)
 local ContextMenu = require(script.ContextMenu)
 local CutsceneExport = require(script.CutsceneExport)
+local CutsceneValidate = require(script.CutsceneValidate)
 local CutsceneBrowser = require(script.CutsceneBrowser)
 local MoonImport = require(script.MoonImport)
 local AnimationAsset = require(script.AnimationAsset)
@@ -352,6 +353,8 @@ local function promptExportToPlace(gui: PluginGui)
 									for _, w in sliceWarnings do
 										warn(w)
 									end
+									-- 24 spec:导出前体检(提醒级,不阻断)
+									local warnCount = CutsceneValidate.report(sliced)
 									print(
 										CutsceneExport.formatExportRangeLog(
 											fromSec,
@@ -384,6 +387,11 @@ local function promptExportToPlace(gui: PluginGui)
 										CutsceneExport.suggestedFilePath(subPath, moduleName)
 									print(
 										`[anima] 已导出 ModuleScript → ReplicatedStorage.{reqPath}`
+											.. (
+												if warnCount > 0
+													then `(校验 {warnCount} 处提醒,见上方)`
+													else ""
+											)
 									)
 									print(`[anima] 程序 require: ReplicatedStorage.{reqPath}`)
 									print(`[anima] Git/Rojo 建议路径: {fileHint}`)
