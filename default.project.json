@@ -17,6 +17,22 @@
         }
       }
     },
+    "Workspace": {
+      "$className": "Workspace",
+      "Baseplate": {
+        "$className": "Part",
+        "$properties": {
+          "Anchored": true,
+          "Locked": true,
+          "Size": [512, 16, 512],
+          "Position": [0, -8, 0],
+          "Color": [0.356, 0.365, 0.404],
+          "Material": "Concrete",
+          "TopSurface": "Smooth",
+          "BottomSurface": "Smooth"
+        }
+      }
+    },
     "ServerScriptService": {
       "$className": "ServerScriptService"
     },
