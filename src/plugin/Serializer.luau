@@ -122,7 +122,9 @@ local function event(ev: CutsceneFormat.CutsceneEvent, indent: string): string
 			elseif tn == "string" then
 				valueSrc = str(v)
 			else
-				warn(`[anima] Serializer:事件 '{ev.name}' payload.{k} 类型 {tn} 不支持,已跳过`)
+				warn(
+					`[anima] Serializer:事件 '{ev.name}' payload.{k} 类型 {tn} 不支持,已跳过`
+				)
 			end
 			if valueSrc then
 				table.insert(parts, string.format("[%s] = %s", str(k), valueSrc))
@@ -178,6 +180,48 @@ local function effectCue(c: CutsceneFormat.EffectCue, indent: string): string
 	return indent .. "{ " .. table.concat(f, ", ") .. " },"
 end
 
+local function color3(c: Color3): string
+	return string.format("Color3.new(%s, %s, %s)", num(c.R), num(c.G), num(c.B))
+end
+
+local function screenCue(c: CutsceneFormat.ScreenCue, indent: string): string
+	local f = { "t = " .. num(c.t), "kind = " .. str(c.kind) }
+	if c.duration and c.duration ~= 1 then
+		table.insert(f, "duration = " .. num(c.duration))
+	end
+	if c.easing then
+		table.insert(f, "easing = " .. str(c.easing))
+	end
+	if c.from then
+		table.insert(f, "from = " .. num(c.from))
+	end
+	if c.to then
+		table.insert(f, "to = " .. num(c.to))
+	end
+	if c.color then
+		table.insert(f, "color = " .. color3(c.color))
+	end
+	if c.tintColor then
+		table.insert(f, "tintColor = " .. color3(c.tintColor))
+	end
+	if c.saturation and c.saturation ~= 0 then
+		table.insert(f, "saturation = " .. num(c.saturation))
+	end
+	if c.hold and c.hold ~= 0 then
+		table.insert(f, "hold = " .. num(c.hold))
+	end
+	if c.imageId and c.imageId ~= "" then
+		table.insert(f, "imageId = " .. str(c.imageId))
+	end
+	if c.count and c.count ~= 3 then
+		table.insert(f, "count = " .. num(c.count))
+	end
+	if c.holdRatio and c.holdRatio ~= 0.3 then
+		table.insert(f, "holdRatio = " .. num(c.holdRatio))
+	end
+	return indent .. "{ " .. table.concat(f, ", ") .. " },"
+end
+
 local function track(tr: CutsceneFormat.Track, indent: string): string
 	local i2 = indent .. "\t"
 	local i3 = i2 .. "\t"
@@ -196,7 +240,11 @@ local function track(tr: CutsceneFormat.Track, indent: string): string
 	if tr.segments and #tr.segments > 0 then
 		table.insert(lines, i2 .. "segments = {")
 		for _, s in tr.segments do
-			table.insert(lines, i3 .. "{ from = " .. num(s.from) .. ", to = " .. num(s.to) .. " },")
+			local sf = { "from = " .. num(s.from), "to = " .. num(s.to) }
+			if s.blendIn and s.blendIn > 0 then
+				table.insert(sf, "blendIn = " .. num(s.blendIn))
+			end
+			table.insert(lines, i3 .. "{ " .. table.concat(sf, ", ") .. " },")
 		end
 		table.insert(lines, i2 .. "},")
 	end
@@ -283,6 +331,13 @@ local function track(tr: CutsceneFormat.Track, indent: string): string
 		end
 		table.insert(lines, i2 .. "},")
 	end
+	if tr.screenCues and #tr.screenCues > 0 then
+		table.insert(lines, i2 .. "screenCues = {")
+		for _, c in tr.screenCues do
+			table.insert(lines, screenCue(c, i3))
+		end
+		table.insert(lines, i2 .. "},")
+	end
 	if tr.jointTracks and #tr.jointTracks > 0 then
 		local i4 = i3 .. "\t"
 		table.insert(lines, i2 .. "jointTracks = {")
@@ -316,6 +371,13 @@ function Serializer.serialize(cutscene: CutsceneFormat.Cutscene): string
 		"\ttakeCameraControl = " .. tostring(cutscene.takeCameraControl ~= false) .. ",",
 		"\ttracks = {",
 	}
+	if cutscene.skippable then
+		-- 插在 "\ttracks = {" 之前,保持 tracks 收尾
+		table.insert(lines, #lines, "\tskippable = true,")
+		if cutscene.skipHoldSec and cutscene.skipHoldSec > 0 then
+			table.insert(lines, #lines, "\tskipHoldSec = " .. num(cutscene.skipHoldSec) .. ",")
+		end
+	end
 	for _, tr in cutscene.tracks do
 		table.insert(lines, track(tr, "\t\t"))
 	end

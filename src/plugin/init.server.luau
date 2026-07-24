@@ -110,7 +110,7 @@ end
 state = EditorState.new(resolveInitialCutscene())
 Preview.cutsceneRevision = state.revision:get()
 local toolbar = plugin:CreateToolbar("Anima")
-local openButton = toolbar:CreateButton("过场编辑器", "打开 Anima Timeline 面板", "")
+local openButton = toolbar:CreateButton("过场编辑器", "打开 Anima 时间轴面板", "")
 openButton.ClickableWhenViewportHidden = true
 local previewButton = toolbar:CreateButton("相机预览", "开关独立相机预览窗口", "")
 previewButton.ClickableWhenViewportHidden = true
@@ -119,7 +119,7 @@ local widget = plugin:CreateDockWidgetPluginGui(
 	"AnimaTimeline",
 	DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Bottom, false, false, 1000, 480, 620, 320)
 )
-widget.Title = "Anima Timeline"
+widget.Title = "Anima 时间轴"
 widget.Name = "AnimaTimeline"
 -- DockWidget 默认 ZIndexBehavior=Global,会让浮层(菜单/弹窗,内部小 ZIndex)被面板高 ZIndex
 -- 元素(播放头 50 等)全局压住;OverlayHost 的"最后子级+ZIndex 100 恒在最上"依赖 Sibling。
@@ -503,7 +503,9 @@ local function deployRuntimeToGame()
 	end
 	print(
 		`[anima] 🚀 运行时已部署到本游戏:{count} 个模块`
-			.. (if clientDeployed then " + 按键播放脚本。F5 后按绑定键即播。" else "")
+			.. (
+				if clientDeployed then " + 按键播放脚本。F5 后按绑定键即播。" else ""
+			)
 	)
 end
 
@@ -551,12 +553,17 @@ local function showBindKeyMenu(gui: PluginGui)
 	ContextMenu.show(gui, items)
 end
 
+-- 实时预览(跟随主视口,方案 B):开启后内嵌预览 = 主视口位姿 + 选中相机轨自己的 FOV,
+-- K 打帧全局生效(不要求鼠标悬在面板内)。
+local viewportFollow = Fusion.Value(false)
+
 local callbacks: App.Callbacks = {
 	isPlaying = playback.isPlaying,
 	loop = playback.loop,
 	mainPreviewActive = mainPreviewActive,
 	recordActive = recordActive,
 	authoringMode = cameraAuthoring.authoringMode,
+	viewportFollow = viewportFollow,
 
 	onPlayPause = function()
 		if not playback.isPlaying:get() and cameraAuthoring:isActive() then
@@ -754,7 +761,8 @@ local callbacks: App.Callbacks = {
 							-- gizmo 摆位:轨道跟随 Player 播放,把首帧按锚点换算到角色当前位置附近
 							local gizmoCf = firstCf
 							if parsed.anchorCf and parsed.liveAnchorCf then
-								gizmoCf = parsed.liveAnchorCf * parsed.anchorCf:ToObjectSpace(firstCf)
+								gizmoCf = parsed.liveAnchorCf
+									* parsed.anchorCf:ToObjectSpace(firstCf)
 							end
 							local part = VCamAuthoring.create(vcamName, gizmoCf)
 							if camData.fov then
@@ -797,7 +805,10 @@ local callbacks: App.Callbacks = {
 									then "存档创作位姿"
 									else "场景当前位姿(存档无根运动轨,若 rig 被挪动过构图会偏)"
 								anchorNote =
-									`已按 '{parsed.anchorName}'({src})转为跟随 Player 的相对运镜 · 首帧距锚点 {string.format("%.1f", dist)} studs`
+									`已按 '{parsed.anchorName}'({src})转为跟随 Player 的相对运镜 · 首帧距锚点 {string.format(
+										"%.1f",
+										dist
+									)} studs`
 							else
 								anchorNote = "世界坐标(未找到创作 Rig,无法转相对)"
 							end
@@ -815,7 +826,10 @@ local callbacks: App.Callbacks = {
 							tr.jointTracks = rig.jointTracks
 							state:commitTracks(true)
 							print(
-								`[anima] 已导入 Moon 关节动画 '{save.Name}' → '{rig.name}' · {#rig.jointTracks} 关节 · {string.format("%.2f", rig.lengthSec)}s(右键轨道可换绑)`
+								`[anima] 已导入 Moon 关节动画 '{save.Name}' → '{rig.name}' · {#rig.jointTracks} 关节 · {string.format(
+									"%.2f",
+									rig.lengthSec
+								)}s(右键轨道可换绑)`
 							)
 						end
 					end,
@@ -867,6 +881,33 @@ local callbacks: App.Callbacks = {
 		local pv = PreviewViewport.new(container)
 		pv:start(getCutscene, getTime, function()
 			return state.revision:get()
+		end)
+		-- 选中即上镜(仅内嵌预览):未播放时选中 camera/cameraMove 轨 → 实时渲染该视角,
+		-- K 帧前就能看到构图;播放中走 CameraDirector 正常择镜。独立相机预览窗不受影响。
+		pv:setOverrideTrack(function()
+			if playback.isPlaying:get() then
+				return nil
+			end
+			local idx = state.selectedTrack:get()
+			if not idx then
+				return nil
+			end
+			local tr = state.tracks:get()[idx]
+			if tr and (tr.kind == "camera" or tr.kind == "cameraMove") and not tr.hidden then
+				return tr
+			end
+			return nil
+		end)
+		-- 实时预览(方案 B):开启且选中相机轨且未播放 → 内嵌预览跟随主视口(FOV 用轨自己的)
+		pv:setViewportFollow(function()
+			if not viewportFollow:get() or playback.isPlaying:get() then
+				return nil
+			end
+			local tr = selectedTrackObj()
+			if tr and (tr.kind == "camera" or tr.kind == "cameraMove") and not tr.hidden then
+				return tr
+			end
+			return nil
 		end)
 		embeddedPreview = pv
 		Preview.skipWorkspaceMedia = true
@@ -1304,6 +1345,15 @@ UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: 
 		return
 	end
 	if input.UserInputType ~= Enum.UserInputType.Keyboard then
+		return
+	end
+	-- 实时预览(跟随主视口)开启时:K 打帧全局生效——鼠标通常在 3D 视口里飞,不做面板内判定
+	if
+		input.KeyCode == Enum.KeyCode.K
+		and viewportFollow:get()
+		and not playback.isPlaying:get()
+	then
+		onCaptureAtPlayhead()
 		return
 	end
 	local m = widget:GetRelativeMousePosition()

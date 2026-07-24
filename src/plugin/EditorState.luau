@@ -37,6 +37,8 @@ export type EditorState = typeof(setmetatable(
 		currentTime: Fusion.Value<number>,
 		tracks: Fusion.Value<{ CutsceneFormat.Track }>,
 		selectedTrack: Fusion.Value<number?>,
+		skippable: Fusion.Value<boolean>, -- 22 spec;不进撤销栈(开关误触可再点)
+		skipHoldSec: Fusion.Value<number>,
 		canUndo: Fusion.Value<boolean>,
 		canRedo: Fusion.Value<boolean>,
 		revision: Fusion.Value<number>, -- 每次结构性变更 +1,供外部(预览/轨迹)重建
@@ -143,12 +145,20 @@ local function cloneTrack(tr: CutsceneFormat.Track): CutsceneFormat.Track
 			table.insert(propKf, { t = k.t, value = k.value, easing = k.easing })
 		end
 	end
+	local screenCues = nil
+	if tr.screenCues then
+		screenCues = {}
+		for _, c in tr.screenCues do
+			-- 值全是标量/Color3,浅拷贝隔离 undo 快照(22 spec)
+			table.insert(screenCues, table.clone(c))
+		end
+	end
 	-- 相机轨:深拷贝 segments;旧单 from/to 迁移成一段(之后 from/to 不再使用)。
 	local segments = nil
 	if tr.segments then
 		segments = {}
 		for _, s in tr.segments do
-			table.insert(segments, { from = s.from, to = s.to })
+			table.insert(segments, { from = s.from, to = s.to, blendIn = s.blendIn })
 		end
 	elseif tr.kind == "camera" and tr.from and tr.to then
 		segments = { { from = tr.from, to = tr.to } }
@@ -177,6 +187,7 @@ local function cloneTrack(tr: CutsceneFormat.Track): CutsceneFormat.Track
 		propKeyframes = propKf,
 		keepOnDone = tr.keepOnDone,
 		jointTracks = jointTracks,
+		screenCues = screenCues,
 	}
 end
 
@@ -197,6 +208,8 @@ function EditorState.new(cutscene: CutsceneFormat.Cutscene): EditorState
 		currentTime = Value(0),
 		tracks = Value(cloneTracks(cutscene.tracks)),
 		selectedTrack = Value(nil),
+		skippable = Value(cutscene.skippable == true),
+		skipHoldSec = Value(cutscene.skipHoldSec or 0),
 		canUndo = Value(false),
 		canRedo = Value(false),
 		revision = Value(0),
@@ -319,6 +332,8 @@ function EditorState.addTrack(
 		track.propKeyframes = {}
 	elseif kind == "rigAnim" then
 		track.jointTracks = {}
+	elseif kind == "screen" then
+		track.screenCues = {}
 	end
 	-- 注:kind == "camera" 走 addCameraTrack(独立轨,含 from/to);此处不再造 shots 轨。
 	table.insert(tracks, track)
@@ -920,7 +935,8 @@ function EditorState.readPropertyValue(
 		return nil, `'{inst.Name}' 上读不到属性 '{propertyName}'`
 	end
 	if not SUPPORTED_PROP_TYPES[typeof(v)] then
-		return nil, `属性 '{propertyName}' 类型 {typeof(v)} 暂不支持(V1:number/boolean/Vector3/Color3)`
+		return nil,
+			`属性 '{propertyName}' 类型 {typeof(v)} 暂不支持(V1:number/boolean/Vector3/Color3)`
 	end
 	return v :: CutsceneFormat.PropValue, nil
 end
@@ -1185,6 +1201,16 @@ local function trackContentEnd(tr: CutsceneFormat.Track): number
 			end
 		end
 	end
+	if tr.screenCues then
+		for _, c in tr.screenCues do
+			maxT = math.max(maxT, c.t + (c.duration or 1))
+		end
+	end
+	if tr.fovKeyframes then
+		for _, k in tr.fovKeyframes do
+			maxT = math.max(maxT, k.t)
+		end
+	end
 	return maxT
 end
 
@@ -1243,6 +1269,16 @@ local function clampAllTracksToDuration(tracks: { CutsceneFormat.Track }, dur: n
 		if tr.effectCues then
 			for _, c in tr.effectCues do
 				c.t = math.clamp(c.t, 0, dur)
+			end
+		end
+		if tr.screenCues then
+			for _, c in tr.screenCues do
+				c.t = math.clamp(c.t, 0, dur)
+			end
+		end
+		if tr.fovKeyframes then
+			for _, k in tr.fovKeyframes do
+				k.t = math.clamp(k.t, 0, dur)
 			end
 		end
 		if tr.propKeyframes then
@@ -1686,6 +1722,171 @@ function EditorState.moveEffectCue(self: EditorState, cue: CutsceneFormat.Effect
 end
 
 -- 一段拖拽结束:重新排序涉及的轨道并做一次结构性提交(刷新预览/轨迹)。
+local function sortFovKeyframes(track: CutsceneFormat.Track)
+	if track.fovKeyframes then
+		table.sort(track.fovKeyframes, function(a, b)
+			return a.t < b.t
+		end)
+	end
+end
+
+-- FOV 关键帧(变焦):同帧(1/fps 内)已有则改值,否则新增。仅 camera 轨。
+function EditorState.addOrSetFovKeyframe(
+	self: EditorState,
+	track: CutsceneFormat.Track,
+	t: number,
+	value: number
+)
+	if track.kind ~= "camera" then
+		return
+	end
+	self:pushUndo()
+	local kfs = track.fovKeyframes
+	if not kfs then
+		kfs = {}
+		track.fovKeyframes = kfs
+	end
+	local eps = 1 / math.max(self.fps:get(), 1) / 2
+	for _, kf in kfs do
+		if math.abs(kf.t - t) <= eps then
+			kf.value = value
+			self:commitTracks(true)
+			return
+		end
+	end
+	table.insert(kfs, { t = t, value = value })
+	sortFovKeyframes(track)
+	self:commitTracks(true)
+end
+
+function EditorState.setFovKeyframeValue(
+	self: EditorState,
+	kf: CutsceneFormat.FovKeyframe,
+	value: number
+)
+	self:pushUndo()
+	kf.value = value
+	self:commitTracks(true)
+end
+
+function EditorState.removeFovKeyframe(
+	self: EditorState,
+	track: CutsceneFormat.Track,
+	kf: CutsceneFormat.FovKeyframe
+)
+	if not track.fovKeyframes then
+		return
+	end
+	for i, k in track.fovKeyframes do
+		if k == kf then
+			self:pushUndo()
+			table.remove(track.fovKeyframes, i)
+			self:commitTracks(true)
+			return
+		end
+	end
+end
+
+local function sortScreenCues(track: CutsceneFormat.Track)
+	if track.screenCues then
+		table.sort(track.screenCues, function(a, b)
+			return a.t < b.t
+		end)
+	end
+end
+
+-- 演出轨 cue(22 spec):按类型给缺省参数;preset 覆盖缺省(如 splash 直接带 imageId),
+-- 整个添加算一步撤销。
+function EditorState.addScreenCue(
+	self: EditorState,
+	track: CutsceneFormat.Track,
+	kind: CutsceneFormat.ScreenCueKind,
+	t: number?,
+	preset: { [string]: any }?
+)
+	if track.kind ~= "screen" then
+		return
+	end
+	self:pushUndo()
+	local cues = track.screenCues
+	if not cues then
+		cues = {}
+		track.screenCues = cues
+	end
+	local cue: CutsceneFormat.ScreenCue = {
+		t = t or self.currentTime:get(),
+		kind = kind,
+		duration = 1,
+	}
+	if kind == "fade" then
+		cue.to = 1
+	elseif kind == "letterbox" then
+		cue.to = 0.12
+	elseif kind == "tint" then
+		cue.tintColor = Color3.fromRGB(255, 60, 60)
+		cue.saturation = -0.5
+		cue.hold = 0.2
+	elseif kind == "splash" then
+		cue.duration = 1.5
+		cue.count = 3
+		cue.holdRatio = 0.3
+	end
+	if preset then
+		for k, v in preset do
+			(cue :: any)[k] = v
+		end
+	end
+	table.insert(cues, cue)
+	sortScreenCues(track)
+	self:commitTracks(true)
+end
+
+function EditorState.removeScreenCue(
+	self: EditorState,
+	track: CutsceneFormat.Track,
+	cue: CutsceneFormat.ScreenCue
+)
+	if not track.screenCues then
+		return
+	end
+	for i, c in track.screenCues do
+		if c == cue then
+			self:pushUndo()
+			table.remove(track.screenCues, i)
+			self:commitTracks(true)
+			return
+		end
+	end
+end
+
+function EditorState.setScreenCueField(
+	self: EditorState,
+	cue: CutsceneFormat.ScreenCue,
+	field: string,
+	value: any
+)
+	self:pushUndo();
+	(cue :: any)[field] = value
+	self:commitTracks(true)
+end
+
+function EditorState.moveScreenCue(self: EditorState, cue: CutsceneFormat.ScreenCue, newT: number)
+	cue.t = math.clamp(newT, 0, self.duration:get())
+	self:commitTracks(false)
+end
+
+-- 相机段 crossfade 混入时长(22 spec);<=0 清除(硬切)。
+function EditorState.setSegmentBlendIn(
+	self: EditorState,
+	_track: CutsceneFormat.Track,
+	segment: CutsceneFormat.CameraSegment,
+	blendIn: number?
+)
+	self:pushUndo()
+	segment.blendIn = if blendIn and blendIn > 0 then blendIn else nil
+	self:commitTracks(true)
+end
+
 function EditorState.finishDrag(self: EditorState)
 	for _, tr in self.tracks:get() do
 		sortKeyframes(tr)
@@ -1694,6 +1895,7 @@ function EditorState.finishDrag(self: EditorState)
 		sortEvents(tr)
 		sortSoundCues(tr)
 		sortEffectCues(tr)
+		sortScreenCues(tr)
 	end
 	self:commitTracks(true)
 end
@@ -1707,6 +1909,10 @@ function EditorState.toCutscene(self: EditorState): CutsceneFormat.Cutscene
 		duration = self.duration:get(),
 		fps = self.fps:get(),
 		takeCameraControl = true,
+		skippable = if self.skippable:get() then true else nil,
+		skipHoldSec = if self.skippable:get() and self.skipHoldSec:get() > 0
+			then self.skipHoldSec:get()
+			else nil,
 		tracks = self.tracks:get(),
 	}
 end
@@ -1718,6 +1924,8 @@ function EditorState.loadCutscene(self: EditorState, cutscene: CutsceneFormat.Cu
 	self.name:set(cutscene.name)
 	self.duration:set(cutscene.duration)
 	self.fps:set(cutscene.fps or 30)
+	self.skippable:set(cutscene.skippable == true)
+	self.skipHoldSec:set(cutscene.skipHoldSec or 0)
 	self.tracks:set(cloneTracks(cutscene.tracks))
 	self.selectedTrack:set(nil)
 	self:setTime(0)

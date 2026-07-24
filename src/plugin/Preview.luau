@@ -12,6 +12,7 @@ local AnimationPreview = require(script.Parent.AnimationPreview)
 local MediaPreview = require(script.Parent.MediaPreview)
 local PropertyPreview = require(script.Parent.PropertyPreview)
 local RigAnimPreview = require(script.Parent.RigAnimPreview)
+local ScreenFxPreview = require(script.Parent.ScreenFxPreview)
 
 local Preview = {}
 
@@ -42,6 +43,7 @@ function Preview.clearAnimationCache()
 	MediaPreview.reset()
 	PropertyPreview.restore()
 	RigAnimPreview.restore()
+	ScreenFxPreview.clear()
 	_lastPreviewT = 0
 	_lastPreviewWsFxT = 0
 end
@@ -49,10 +51,17 @@ end
 -- 在时间 t 应用一帧预览。includeCamera=false 时不动相机(避免抢视角)。
 function Preview.applyAt(cutscene: CutsceneFormat.Cutscene, t: number, includeCamera: boolean)
 	if Preview.skipWorkspaceMedia then
-		MediaPreview.step(cutscene, t, _lastPreviewWsFxT, SceneResolver.resolve, "workspace-effects", {
-			kinds = { effect = true },
-			cutsceneRevision = Preview.cutsceneRevision,
-		})
+		MediaPreview.step(
+			cutscene,
+			t,
+			_lastPreviewWsFxT,
+			SceneResolver.resolve,
+			"workspace-effects",
+			{
+				kinds = { effect = true },
+				cutsceneRevision = Preview.cutsceneRevision,
+			}
+		)
 		_lastPreviewWsFxT = t
 	end
 	if not Preview.skipWorkspaceMedia then
@@ -62,6 +71,7 @@ function Preview.applyAt(cutscene: CutsceneFormat.Cutscene, t: number, includeCa
 	end
 	PropertyPreview.apply(cutscene, t, resolve, "workspace")
 	RigAnimPreview.apply(cutscene, t, resolve)
+	ScreenFxPreview.apply(cutscene, t)
 	_lastPreviewT = t
 	AnimationPreview.pruneCache(_animCache)
 	for _, track in cutscene.tracks do
@@ -73,7 +83,11 @@ function Preview.applyAt(cutscene: CutsceneFormat.Cutscene, t: number, includeCa
 				local cf = Sampler.sampleCFrame(track.keyframes, t)
 				if cf then
 					local target = resolve(track.target)
-					if target and target:IsDescendantOf(workspace) and not isCharacterModel(target) then
+					if
+						target
+						and target:IsDescendantOf(workspace)
+						and not isCharacterModel(target)
+					then
 						applyCFrame(target, cf)
 					end
 				end

@@ -18,6 +18,7 @@ local DEFAULT_TRACK_NAME: { [string]: string } = {
 	effect = "特效轨道",
 	property = "属性轨道",
 	rigAnim = "关节动画轨道",
+	screen = "演出轨道",
 }
 
 -- Unity 轨道类型徽标(字母块,替代 emoji)
@@ -31,6 +32,7 @@ local TRACK_BADGE: { [string]: string } = {
 	effect = "F",
 	property = "P",
 	rigAnim = "R",
+	screen = "☰",
 }
 
 function TimelineUnity.defaultTrackName(kind: TrackKind): string
@@ -64,11 +66,14 @@ function TimelineUnity.trackBindingLine(track: CutsceneFormat.Track): string
 	if track.kind == "event" then
 		return "标记 · " .. track.target
 	end
+	if track.kind == "screen" then
+		return "屏幕 · " .. #(track.screenCues or {}) .. " 个效果"
+	end
 	if track.kind == "property" then
 		return "绑定 · " .. track.target .. " · " .. (track.propertyName or "?")
 	end
 	if track.kind == "rigAnim" then
-		return "绑定 · " .. track.target .. " · " .. (#(track.jointTracks or {})) .. " 关节"
+		return "绑定 · " .. track.target .. " · " .. #(track.jointTracks or {}) .. " 关节"
 	end
 	return "绑定 · " .. track.target
 end

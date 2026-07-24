@@ -42,6 +42,13 @@ export type PreviewViewport = typeof(setmetatable(
 		_getTime: (() -> number)?,
 		_lastMediaT: number,
 		_getRevision: (() -> number)?,
+		-- 选中相机覆盖(编辑手感):返回选中的 camera/cameraMove 轨则"选中即上镜",
+		-- 无视生效段实时渲染该视角(K 帧前就能看到画面);nil 走 CameraDirector 正常择镜。
+		-- 仅内嵌预览注入;独立相机预览窗不注入,保持原行为。
+		_getOverrideTrack: (() -> CutsceneFormat.Track?)?,
+		-- 实时预览跟随主视口(方案 B):返回轨则相机位姿取 workspace.CurrentCamera、
+		-- FOV 取该轨自己的(fovKeyframes → vcam attribute),优先级高于 _getOverrideTrack。
+		_getViewportFollow: (() -> CutsceneFormat.Track?)?,
 	},
 	PreviewViewport
 ))
@@ -193,7 +200,25 @@ function PreviewViewport.new(parent: Instance): PreviewViewport
 		_getTime = nil,
 		_lastMediaT = 0,
 		_getRevision = nil,
+		_getOverrideTrack = nil,
+		_getViewportFollow = nil,
 	}, PreviewViewport)
+end
+
+-- 注入"实时预览跟随主视口"getter(见类型注释);传 nil 取消。
+function PreviewViewport.setViewportFollow(
+	self: PreviewViewport,
+	getter: (() -> CutsceneFormat.Track?)?
+)
+	self._getViewportFollow = getter
+end
+
+-- 注入"选中相机覆盖"getter(见类型注释);传 nil 取消。
+function PreviewViewport.setOverrideTrack(
+	self: PreviewViewport,
+	getter: (() -> CutsceneFormat.Track?)?
+)
+	self._getOverrideTrack = getter
 end
 
 local function findDescendantInClone(
@@ -343,7 +368,45 @@ function PreviewViewport.update(
 		end
 	end
 
-	local camCF, fov, active = evalCamera(cutscene, t, SceneResolver.resolve)
+	local camCF: CFrame?, fov: number?, active: string?
+
+	-- 实时预览跟随主视口(优先):位姿 = 主视口相机,FOV = 该轨自己的 → 飞视口找构图,按 K 打帧
+	local followTrack = if self._getViewportFollow then self._getViewportFollow() else nil
+	if followTrack then
+		local tr = followTrack :: CutsceneFormat.Track
+		local mainCam = workspace.CurrentCamera
+		if mainCam then
+			camCF = mainCam.CFrame
+		end
+		fov = CameraDirector.fovForCameraTrack(tr, t)
+		if not fov then
+			local part = VCam.find(tr.target)
+			local f = part and part:GetAttribute("FOV")
+			if typeof(f) == "number" then
+				fov = f
+			end
+		end
+		active = "跟手 " .. tr.target .. " · 按 K 打帧"
+	end
+
+	-- 选中相机覆盖:选中的 camera/cameraMove 轨无视生效段直接上镜(K 帧前即见画面)
+	local overrideTrack = if self._getOverrideTrack then self._getOverrideTrack() else nil
+	if not camCF and overrideTrack then
+		local tr = overrideTrack :: CutsceneFormat.Track
+		camCF = CameraDirector.trackPoseIgnoreSegments(cutscene, tr, t, SceneResolver.resolve)
+		fov = CameraDirector.fovForCameraTrack(tr, t)
+		if not fov then
+			local part = VCam.find(tr.target)
+			local f = part and part:GetAttribute("FOV")
+			if typeof(f) == "number" then
+				fov = f
+			end
+		end
+		active = "选中 " .. tr.target
+	end
+	if not camCF then
+		camCF, fov, active = evalCamera(cutscene, t, SceneResolver.resolve)
+	end
 	if camCF then
 		self.cam.CFrame = camCF
 	end
