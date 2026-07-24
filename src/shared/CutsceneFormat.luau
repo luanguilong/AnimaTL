@@ -25,9 +25,11 @@ export type TrackKind =
 	| "effect"
 	| "property"
 	| "rigAnim"
+	| "screen"
 
--- 数据契约版本(17 spec):无 formatVersion 字段的旧数据视为 1;property 轨落地起为 2。
-CutsceneFormat.FORMAT_VERSION = 2
+-- 数据契约版本(17 spec):无 formatVersion 字段的旧数据视为 1;property 轨落地起为 2;
+-- screen 轨 / 相机段 blendIn / skippable(22 spec)起为 3。所有新字段可选,旧数据零迁移。
+CutsceneFormat.FORMAT_VERSION = 3
 
 -- 缓动名(见 Easing.luau;T5/21 spec 扩展 Expo/Back/Elastic/Bounce)
 export type EasingName =
@@ -111,6 +113,32 @@ function CutsceneFormat.effectEmitMode(cue: EffectCue): EffectEmitMode
 	return "particle"
 end
 
+-- 演出轨 cue(22 spec):叠在屏幕上的效果。target 固定 "Screen",不走 BindingResolver。
+--   fade      全屏遮罩:BackgroundTransparency 从 from(缺省=上一 fade 的 to,无则 1)插值到 to。
+--   letterbox 上下黑边:单边高占比插值到 to(from 同上语义,无则 0)。
+--   tint      专用 ColorCorrection:duration-hold 的前后半各为攻/回落,中间 hold 保持。
+--   splash    count 张贴图随机边角淡入-停留-淡出;随机种子 = cue 下标,重播/seek 一致。
+export type ScreenCueKind = "fade" | "letterbox" | "tint" | "splash"
+
+export type ScreenCue = {
+	t: number,
+	kind: ScreenCueKind,
+	duration: number?, -- 效果总时长(秒);缺省 1
+	easing: EasingName?, -- 插值缓动;缺省 quadOut
+	-- fade / letterbox:
+	from: number?,
+	to: number?,
+	color: Color3?, -- fade 遮罩色;缺省黑
+	-- tint:
+	tintColor: Color3?,
+	saturation: number?,
+	hold: number?, -- 顶峰保持时长(秒);缺省 0
+	-- splash:
+	imageId: string?,
+	count: number?, -- 贴图张数;缺省 3
+	holdRatio: number?, -- duration 中停留段占比 0..1;缺省 0.3
+}
+
 -- 属性轨(17 spec):K 任意 Instance 属性。V1 值类型:number/Vector3/Color3 插值,
 -- boolean 阶梯(到 key 即切换)。EnumItem/Sequence 等留 V2(阶梯)。
 export type PropValue = number | boolean | Vector3 | Color3
@@ -155,6 +183,7 @@ export type JointTrack = {
 export type CameraSegment = {
 	from: number, -- 段起(秒)
 	to: number, -- 段止(秒)
+	blendIn: number?, -- 22 spec:进入本段前 blendIn 秒与上一镜位姿/FOV 插值;nil = 硬切
 }
 
 -- 一条轨道
@@ -205,6 +234,9 @@ export type Track = {
 	-- kind == "rigAnim" 时用(20 spec):target = 角色绑定。
 	-- 注意:同一角色勿与 animation 轨同播(Animator 每帧也写 Transform,互踩)。
 	jointTracks: { JointTrack }?,
+
+	-- kind == "screen" 时用(22 spec):
+	screenCues: { ScreenCue }?,
 }
 
 -- 一个完整过场
@@ -221,6 +253,10 @@ export type Cutscene = {
 
 	-- 可选:过场开始时是否接管本地 Camera(默认 true)。
 	takeCameraControl: boolean?,
+
+	-- 可选(22 spec):是否允许玩家跳过;按住时长(秒,0 = 点按即跳)。
+	skippable: boolean?,
+	skipHoldSec: number?,
 }
 
 -- 运行时提供的绑定解析器:把逻辑名解析成真实实例。

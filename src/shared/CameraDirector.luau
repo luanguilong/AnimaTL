@@ -41,14 +41,31 @@ function CameraDirector.fovForCameraTrack(tr: CutsceneFormat.Track, t: number): 
 	return nil
 end
 
--- 返回 (相机 CFrame, 上镜相机名, FOV?)。找不到返回 (nil, nil, nil)。
--- FOV 仅当上镜轨带 fovKeyframes 时返回,否则 nil(消费端用 vcam 的 FOV attribute)。
-function CameraDirector.evaluate(
+-- 单条相机/cameraMove 轨在 t 的位姿,**无视生效段**(选中即上镜的编辑预览用):
+-- 有 keyframes 则采样其运动(段外 clamp 到端点),否则回退 VCamPose(运动轨/静态机位)。
+function CameraDirector.trackPoseIgnoreSegments(
 	cutscene: CutsceneFormat.Cutscene,
+	tr: CutsceneFormat.Track,
 	t: number,
 	resolveBinding: CutsceneFormat.BindingResolver?
-): (CFrame?, string?, number?)
-	-- 1) 覆盖 t 的独立相机轨(落在任一生效段内),层级最高(索引最小)那条
+): CFrame?
+	if tr.kind ~= "camera" and tr.kind ~= "cameraMove" then
+		return nil
+	end
+	if tr.kind == "camera" and tr.keyframes and #tr.keyframes > 0 then
+		local stored = Sampler.sampleTrackCFrame(tr, t)
+		if stored and resolveBinding then
+			return FollowAnchor.worldFromKeyframeCFrame(tr, stored, resolveBinding)
+		end
+		if stored then
+			return stored
+		end
+	end
+	return VCamPose.at(cutscene, tr.target, t)
+end
+
+-- 覆盖 t 的独立相机轨中"时间轴最上层"(索引最小)那条;无则 nil。
+local function topShotAt(cutscene: CutsceneFormat.Cutscene, t: number): CutsceneFormat.Track?
 	local best: CutsceneFormat.Track? = nil
 	local bestIdx: number? = nil
 	for i, tr in cutscene.tracks do
@@ -58,9 +75,71 @@ function CameraDirector.evaluate(
 			end
 		end
 	end
+	return best
+end
+
+-- 单条相机轨在 t 的位姿,含 VCamPose 回退(evaluate 与 crossfade 上一镜共用)。
+local function shotPoseAt(
+	cutscene: CutsceneFormat.Cutscene,
+	tr: CutsceneFormat.Track,
+	t: number,
+	resolveBinding: CutsceneFormat.BindingResolver?
+): CFrame?
+	local cf = CameraDirector.poseForCameraTrack(cutscene, tr, t, resolveBinding)
+	if cf then
+		return cf
+	end
+	return VCamPose.at(cutscene, tr.target, t)
+end
+
+-- tr 覆盖 t 的那个段;无则 nil。
+local function segmentAt(tr: CutsceneFormat.Track, t: number): CutsceneFormat.CameraSegment?
+	for _, s in CutsceneFormat.segmentsOf(tr) do
+		if s.from <= t and t <= s.to then
+			return s
+		end
+	end
+	return nil
+end
+
+-- 返回 (相机 CFrame, 上镜相机名, FOV?)。找不到返回 (nil, nil, nil)。
+-- FOV 仅当上镜轨带 fovKeyframes 时返回,否则 nil(消费端用 vcam 的 FOV attribute)。
+function CameraDirector.evaluate(
+	cutscene: CutsceneFormat.Cutscene,
+	t: number,
+	resolveBinding: CutsceneFormat.BindingResolver?
+): (CFrame?, string?, number?)
+	-- 1) 覆盖 t 的独立相机轨(落在任一生效段内),层级最高(索引最小)那条
+	local best = topShotAt(cutscene, t)
 	if best then
 		local fov = CameraDirector.fovForCameraTrack(best, t)
-		local cf = CameraDirector.poseForCameraTrack(cutscene, best, t, resolveBinding)
+		local cf = shotPoseAt(cutscene, best, t, resolveBinding)
+
+		-- 22 spec crossfade:段带 blendIn 且尚在混入窗口 → 与上一镜位姿/FOV 插值。
+		-- 上一镜 = 段起点前一瞬的上镜轨;其段已结束则用段末冻结位姿(仍覆盖则继续运动)。
+		local seg = segmentAt(best, t)
+		if cf and seg and seg.blendIn and seg.blendIn > 0 and t - seg.from < seg.blendIn then
+			local justBefore = seg.from - 1e-3
+			local prev = topShotAt(cutscene, justBefore)
+			if prev and prev ~= best then
+				local prevSeg = segmentAt(prev, justBefore)
+				local prevT = if prevSeg then math.min(t, prevSeg.to) else justBefore
+				local prevCf = shotPoseAt(cutscene, prev, prevT, resolveBinding)
+				if prevCf then
+					local a = math.clamp((t - seg.from) / seg.blendIn, 0, 1)
+					a = a * a * (3 - 2 * a) -- smoothstep
+					cf = prevCf:Lerp(cf, a)
+					local prevFov = CameraDirector.fovForCameraTrack(prev, prevT)
+					if fov and prevFov then
+						fov = prevFov + (fov - prevFov) * a
+					elseif prevFov and not fov then
+						-- 当前镜无 FOV 关键帧:从上一镜 FOV 平滑回落交给消费端 attribute,不强插
+						fov = if a < 1 then prevFov else nil
+					end
+				end
+			end
+		end
+
 		if cf then
 			return cf, best.target, fov
 		end
