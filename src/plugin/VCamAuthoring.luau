@@ -26,6 +26,61 @@ local function addArrow(part: BasePart)
 	tex.Parent = part
 end
 
+-- 真视锥 wireframe(T9):从相机原点沿 -Z 展开的四棱锥线框,张角随 FOV attribute,
+-- 宽高比按 16:9,远平面 6 studs。FOV 改变时整组重建。
+local FRUSTUM_DEPTH = 6
+local FRUSTUM_ASPECT = 16 / 9
+local FRUSTUM_COLOR = Color3.fromRGB(120, 200, 255)
+
+local function frustumLine(part: BasePart, folder: Folder, from: Vector3, to: Vector3)
+	local line = Instance.new("LineHandleAdornment")
+	line.Adornee = part
+	line.CFrame = CFrame.lookAt(from, to)
+	line.Length = (to - from).Magnitude
+	line.Thickness = 2
+	line.Color3 = FRUSTUM_COLOR
+	line.Transparency = 0.25
+	line.AlwaysOnTop = true
+	line.ZIndex = 0
+	line.Parent = folder
+end
+
+local function buildFrustum(part: BasePart)
+	local old = part:FindFirstChild("FrustumLines")
+	if old then
+		old:Destroy()
+	end
+	local folder = Instance.new("Folder")
+	folder.Name = "FrustumLines"
+
+	local fovAttr = part:GetAttribute("FOV")
+	local fov = if typeof(fovAttr) == "number" then fovAttr :: number else 70
+	local halfH = FRUSTUM_DEPTH * math.tan(math.rad(fov / 2))
+	local halfW = halfH * FRUSTUM_ASPECT
+	local origin = Vector3.zero
+	local corners = {
+		Vector3.new(-halfW, halfH, -FRUSTUM_DEPTH),
+		Vector3.new(halfW, halfH, -FRUSTUM_DEPTH),
+		Vector3.new(halfW, -halfH, -FRUSTUM_DEPTH),
+		Vector3.new(-halfW, -halfH, -FRUSTUM_DEPTH),
+	}
+	for i, c in corners do
+		frustumLine(part, folder, origin, c)
+		frustumLine(part, folder, c, corners[i % 4 + 1])
+	end
+	folder.Parent = part
+end
+
+-- 确保 vcam 带视锥线框(create 时/面板打开时对存量 vcam 补建),并跟随 FOV 变化。
+function VCamAuthoring.ensureFrustum(part: BasePart)
+	if not part:FindFirstChild("FrustumLines") then
+		buildFrustum(part)
+		part:GetAttributeChangedSignal("FOV"):Connect(function()
+			buildFrustum(part)
+		end)
+	end
+end
+
 -- 给 gizmo 加一个悬浮名字标签。
 local function addLabel(part: BasePart, name: string)
 	local bb = Instance.new("BillboardGui")
@@ -63,6 +118,7 @@ function VCamAuthoring.create(name: string, cf: CFrame): BasePart
 
 	addArrow(part)
 	addLabel(part, name)
+	VCamAuthoring.ensureFrustum(part)
 
 	part.Parent = container
 	return part

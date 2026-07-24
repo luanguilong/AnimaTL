@@ -1290,6 +1290,13 @@ local function ensureMounted()
 			mounted = true
 		end
 		startCameraPath()
+		-- 存量 vcam(本插件版本之前创建的)补建视锥线框
+		for _, name in VCam.list() do
+			local part = VCam.find(name)
+			if part then
+				VCamAuthoring.ensureFrustum(part)
+			end
+		end
 	else
 		stopCameraPath()
 		if embeddedPreview then
