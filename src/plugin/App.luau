@@ -23,6 +23,7 @@ local InputPrompt = require(script.Parent.InputPrompt)
 local CutsceneFormat = require(script.Parent.Shared.CutsceneFormat)
 local VCam = require(script.Parent.Shared.VCam)
 local Sampler = require(script.Parent.Shared.Sampler)
+local AnimaAssets = require(script.Parent.Shared.AnimaAssets)
 local TimelineUnity = require(script.Parent.TimelineUnity)
 local AnimationAsset = require(script.Parent.AnimationAsset)
 local Easing = require(script.Parent.Shared.Easing)
@@ -744,6 +745,51 @@ local function propValueFromText(
 	return nil
 end
 
+-- Forge 特效包选择器(25 spec):列出 ReplicatedStorage.AnimaAssets 下全部 Model
+-- (显示相对路径),点选回调包名;保留手输兜底;文件夹缺失给一键创建。
+local function pickForgePack(gui: PluginGui, onPick: (name: string) -> ())
+	local items: { ContextMenu.Item } = {
+		{ kind = "header", text = "选择特效包(AnimaAssets)" },
+	}
+	local packs = AnimaAssets.listPacks()
+	if AnimaAssets.root(false) == nil then
+		table.insert(items, {
+			text = "＋ 创建 AnimaAssets 文件夹",
+			onClick = function()
+				AnimaAssets.root(true)
+				print(
+					"[anima] 已创建 ReplicatedStorage.AnimaAssets——把特效包(Model)放进去后重开本菜单"
+				)
+			end,
+		})
+	elseif #packs == 0 then
+		table.insert(items, { kind = "header", text = "(AnimaAssets 下暂无 Model)" })
+	end
+	for _, entry in packs do
+		local packName = entry.name
+		table.insert(items, {
+			text = "  " .. entry.path,
+			onClick = function()
+				onPick(packName)
+			end,
+		})
+	end
+	table.insert(items, { kind = "sep" })
+	table.insert(items, {
+		text = "手输名字…(留空 = 整绑定)",
+		onClick = function()
+			InputPrompt.show(gui, {
+				title = "forgeRoot(绑定下子 Model 名,留空=整绑定)",
+				placeholder = "如 驴踢;留空 emit 整个绑定",
+				onSubmit = function(txt)
+					onPick(txt)
+				end,
+			})
+		end,
+	})
+	ContextMenu.show(gui, items, { width = 260 })
+end
+
 -- 轨道右键菜单(左栏行 / 时间轴行共用):按类型的快捷操作 + 改名 / 换目标 / 删除。
 -- atTime:时间轴行右键时传入点击处对应的时间,创建项在该时间点生效;
 -- 不传(左栏行)则沿用当前播放头时间。
@@ -905,14 +951,10 @@ local function showTrackMenu(
 		table.insert(items, {
 			text = "＋ Forge 特效…" .. suffix,
 			onClick = function()
-				InputPrompt.show(gui, {
-					title = "forgeRoot(绑定下子 Model 名,留空=整绑定)",
-					placeholder = "如 Slash;留空 emit 整个绑定",
-					onSubmit = function(txt)
-						local root = if txt ~= "" then txt else nil
-						state:addEffectCue(track, nil, nil, atTime, "forge", root)
-					end,
-				})
+				pickForgePack(gui, function(packName)
+					local root = if packName ~= "" then packName else nil
+					state:addEffectCue(track, nil, nil, atTime, "forge", root)
+				end)
 			end,
 		})
 		table.insert(items, {
@@ -2678,20 +2720,16 @@ local function effectCueMarker(
 						end,
 					},
 					{
-						text = "Forge: 改 forgeRoot…",
+						text = "Forge: 选特效包/改 forgeRoot…",
 						onClick = function()
-							InputPrompt.show(gui, {
-								title = "forgeRoot(留空=整绑定)",
-								default = cue.forgeRoot or "",
-								onSubmit = function(txt)
-									state:setEffectCueField(
-										cue,
-										"forgeRoot",
-										if txt ~= "" then txt else nil
-									)
-									state:setEffectCueField(cue, "emitMode", "forge")
-								end,
-							})
+							pickForgePack(gui, function(packName)
+								state:setEffectCueField(
+									cue,
+									"forgeRoot",
+									if packName ~= "" then packName else nil
+								)
+								state:setEffectCueField(cue, "emitMode", "forge")
+							end)
 						end,
 					},
 					{

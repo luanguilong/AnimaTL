@@ -9,6 +9,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local Anima = ReplicatedStorage:WaitForChild("Anima")
 local CutscenePlayer = require(Anima.Runtime.CutscenePlayer)
 local ForgeEffectPlay = require(Anima.Shared.ForgeEffectPlay)
+local AnimaAssets = require(Anima.Shared.AnimaAssets)
 
 -- 按键绑定来自过场模块的 Attribute `AnimaPlayKey`(插件 📂 → ⌨ 绑定按键 写入,零代码)。
 -- 整个 Cutscenes 里一个 Attribute 都没有时,退回下面的默认表(兼容旧场景)。
@@ -33,23 +34,10 @@ local function findForgeVfxModule(): ModuleScript?
 	return nil
 end
 
+-- 25 spec:统一走 AnimaAssets 约定(AnimaAssets 递归 → 旧位置兜底,命中旧位置会提示迁移)
 local function findVfxTemplate(): Model?
-	local assets = ReplicatedStorage:FindFirstChild("Assets")
-	if assets then
-		local m = assets:FindFirstChild(VFX_PACK_NAME)
-		if m and m:IsA("Model") then
-			return m
-		end
-	end
-	local m = ReplicatedStorage:FindFirstChild(VFX_PACK_NAME)
-	if m and m:IsA("Model") then
-		return m
-	end
-	m = workspace:FindFirstChild(VFX_PACK_NAME, true)
-	if m and m:IsA("Model") then
-		return m
-	end
-	return nil
+	local pack = AnimaAssets.findPack(VFX_PACK_NAME)
+	return pack
 end
 
 do

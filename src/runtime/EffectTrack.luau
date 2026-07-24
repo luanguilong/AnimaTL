@@ -8,6 +8,7 @@ local RunService = game:GetService("RunService")
 
 local CutsceneFormat = require(script.Parent.Parent.Shared.CutsceneFormat)
 local ForgeEffectPlay = require(script.Parent.Parent.Shared.ForgeEffectPlay)
+local AnimaAssets = require(script.Parent.Parent.Shared.AnimaAssets)
 local ForgeApproxFx = require(script.Parent.ForgeApproxFx)
 
 local ViewportFxFeedback: any = nil
@@ -459,7 +460,24 @@ function EffectTrack.runForgeEditorPreview(
 	addRoot(target)
 	addRoot(track._workspaceMirror)
 	if #roots == 0 then
-		warn(`[anima] EffectTrack:forge 预览无有效目标(forgeRoot='{cue.forgeRoot or ""}')`)
+		-- 25 spec:目标下没挂包 → 从 AnimaAssets 找到模板临时 clone 到目标,
+		-- 登记进 _spawned(stop 统一销毁,不污染场景),编辑期预览与运行时对齐。
+		local packName = cue.forgeRoot or ""
+		if packName ~= "" and target then
+			local template = AnimaAssets.findPack(packName)
+			if template then
+				local clone = template:Clone()
+				clone.Archivable = false
+				clone.Parent = target
+				table.insert(track._spawned, clone)
+				table.insert(roots, clone)
+			end
+		end
+	end
+	if #roots == 0 then
+		warn(
+			`[anima] EffectTrack:forge 预览无有效目标(forgeRoot='{cue.forgeRoot or ""}',AnimaAssets 中也未找到同名包)`
+		)
 		return
 	end
 	-- 仅当 emitter 自身无 EmitCount 属性时,才退回 cue.emitCount / 默认值。

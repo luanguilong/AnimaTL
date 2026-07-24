@@ -4,6 +4,7 @@
 
 local CutsceneFormat = require(script.Parent.Shared.CutsceneFormat)
 local VCam = require(script.Parent.Shared.VCam)
+local AnimaAssets = require(script.Parent.Shared.AnimaAssets)
 local SceneResolver = require(script.Parent.SceneResolver)
 
 local CutsceneValidate = {}
@@ -140,6 +141,44 @@ function CutsceneValidate.run(cutscene: CutsceneFormat.Cutscene): { string }
 			if c.kind == "splash" and (not c.imageId or c.imageId == "") then
 				table.insert(warns, `{label}:splash cue 缺 imageId,运行时静默不渲染`)
 				break
+			end
+		end
+
+		-- forge cue 特效包(25 spec):找不到 → 提醒;仅旧位置找到 → 提示迁移
+		for _, c in tr.effectCues or {} do
+			if
+				CutsceneFormat.effectEmitMode(c) == "forge"
+				and c.forgeRoot
+				and c.forgeRoot ~= ""
+			then
+				local pack, isLegacy = AnimaAssets.findPack(c.forgeRoot)
+				if not pack then
+					table.insert(
+						warns,
+						`{label}:forge 包 '{c.forgeRoot}' 在 AnimaAssets 及旧位置均未找到`
+					)
+				elseif isLegacy then
+					table.insert(
+						warns,
+						`{label}:forge 包 '{c.forgeRoot}' 在旧位置——建议移入 ReplicatedStorage.AnimaAssets`
+					)
+				end
+			end
+		end
+	end
+
+	-- AnimaAssets 内重名包(选择器靠路径区分,运行时取第一个;建议改名)
+	do
+		local seen: { [string]: number } = {}
+		for _, entry in AnimaAssets.listPacks() do
+			seen[entry.name] = (seen[entry.name] or 0) + 1
+		end
+		for packName, n in seen do
+			if n > 1 then
+				table.insert(
+					warns,
+					`AnimaAssets 内有 {n} 个同名包 '{packName}',运行时取第一个——建议改名`
+				)
 			end
 		end
 	end
