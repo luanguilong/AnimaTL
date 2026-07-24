@@ -528,6 +528,120 @@ type KfClipboard = {
 }
 local _kfClipboard: KfClipboard? = nil
 
+-- 关键帧选中态(23 spec 后置项):短按菱形选中(高亮描边),Ctrl+C 复制、
+-- Ctrl+V 粘贴到左列选中轨的播放头处。单选;选中另一颗即替换。
+type SelectedKf = {
+	track: CutsceneFormat.Track,
+	ref: any, -- Keyframe / PropKeyframe / CutsceneEvent 引用(身份比较 + 描边判定)
+	toClipboard: () -> KfClipboard?,
+}
+local _selectedKf: Fusion.Value<SelectedKf?> = Fusion.Value(nil)
+
+-- 选中描边(挂在菱形/标记的 Children 里,选中即亮)
+local function selectionStroke(ref: any): Instance
+	return e("UIStroke")({
+		Color = Theme.color.accent,
+		Thickness = 2,
+		Transparency = Computed(function()
+			local sel = _selectedKf:get()
+			return if sel and sel.ref == ref then 0 else 1
+		end),
+	})
+end
+
+local function clipboardCompatible(clip: KfClipboard?, track: CutsceneFormat.Track): boolean
+	if not clip then
+		return false
+	end
+	return (
+		clip.kind == "cframe"
+		and (track.kind == "camera" or track.kind == "cameraMove" or track.kind == "transform")
+	)
+		or (clip.kind == "prop" and track.kind == "property")
+		or (clip.kind == "event" and track.kind == "event")
+end
+
+-- 把剪贴板粘贴到 track 的 pasteT 处(菜单与 Ctrl+V 共用)。
+local function pasteClipboard(
+	state: EditorState.EditorState,
+	track: CutsceneFormat.Track,
+	pasteT: number
+)
+	local clip = _kfClipboard
+	if not clip then
+		return
+	end
+	if clip.kind == "cframe" then
+		state:pasteCFrameKeyframe(
+			track,
+			pasteT,
+			clip.value :: CFrame,
+			clip.easing,
+			clip.outTangent,
+			clip.inTangent
+		)
+	elseif clip.kind == "prop" then
+		local kfs = track.propKeyframes
+		local sample = if kfs and kfs[1] then kfs[1].value else nil
+		if sample ~= nil and typeof(sample) ~= typeof(clip.value) then
+			warn(
+				`[anima] 粘贴取消:剪贴板值类型 {typeof(clip.value)} 与该轨 {typeof(
+					sample
+				)} 不符`
+			)
+			return
+		end
+		local err = state:capturePropFrame(track, clip.value, pasteT, clip.easing)
+		if err then
+			warn("[anima] 粘贴失败:" .. err)
+		end
+	elseif clip.kind == "event" and clip.name then
+		state:addEvent(
+			track,
+			clip.name,
+			pasteT,
+			if clip.payload then table.clone(clip.payload) else nil
+		)
+	end
+end
+
+-- Ctrl+C:复制选中的关键帧到剪贴板。返回是否成功(init 快捷键用)。
+function App.copySelectedKeyframe(): boolean
+	local sel = _selectedKf:get()
+	if not sel then
+		print("[anima] Ctrl+C:先短按一颗关键帧菱形选中")
+		return false
+	end
+	local clip = sel.toClipboard()
+	if not clip then
+		return false
+	end
+	_kfClipboard = clip
+	print(`[anima] 已复制关键帧({clip.kind})——Ctrl+V 粘贴到选中轨播放头`)
+	return true
+end
+
+-- Ctrl+V:粘贴到左列选中轨的播放头。返回是否成功。
+function App.pasteClipboardAtPlayhead(state: EditorState.EditorState): boolean
+	local clip = _kfClipboard
+	if not clip then
+		print("[anima] Ctrl+V:剪贴板为空(先 Ctrl+C 或右键复制)")
+		return false
+	end
+	local idx = state.selectedTrack:get()
+	local track = if idx then state.tracks:get()[idx] else nil
+	if not track then
+		print("[anima] Ctrl+V:先在左列选中要粘贴的轨道")
+		return false
+	end
+	if not clipboardCompatible(clip, track) then
+		warn(`[anima] Ctrl+V:剪贴板({clip.kind})与选中轨({track.kind})类型不兼容`)
+		return false
+	end
+	pasteClipboard(state, track, state.currentTime:get())
+	return true
+end
+
 -- 事件 payload ↔ 文本:`k=v; k2=v2`,值自动转型(number/true/false/string)。19 spec。
 local function payloadToText(payload: { [string]: any }): string
 	local keys = {}
@@ -958,55 +1072,11 @@ local function showTrackMenu(
 	do
 		local clip = _kfClipboard
 		local pasteT = atTime or state.currentTime:get()
-		local compatible = clip ~= nil
-			and (
-				(
-					clip.kind == "cframe"
-					and (
-						track.kind == "camera"
-						or track.kind == "cameraMove"
-						or track.kind == "transform"
-					)
-				)
-				or (clip.kind == "prop" and track.kind == "property")
-				or (clip.kind == "event" and track.kind == "event")
-			)
-		if clip and compatible then
+		if clip and clipboardCompatible(clip, track) then
 			table.insert(items, {
 				text = string.format("📋 粘贴关键帧 @ %.2fs", pasteT),
 				onClick = function()
-					if clip.kind == "cframe" then
-						state:pasteCFrameKeyframe(
-							track,
-							pasteT,
-							clip.value :: CFrame,
-							clip.easing,
-							clip.outTangent,
-							clip.inTangent
-						)
-					elseif clip.kind == "prop" then
-						local kfs = track.propKeyframes
-						local sample = if kfs and kfs[1] then kfs[1].value else nil
-						if sample ~= nil and typeof(sample) ~= typeof(clip.value) then
-							warn(
-								`[anima] 粘贴取消:剪贴板值类型 {typeof(clip.value)} 与该轨 {typeof(
-									sample
-								)} 不符`
-							)
-							return
-						end
-						local err = state:capturePropFrame(track, clip.value, pasteT, clip.easing)
-						if err then
-							warn("[anima] 粘贴失败:" .. err)
-						end
-					elseif clip.kind == "event" and clip.name then
-						state:addEvent(
-							track,
-							clip.name,
-							pasteT,
-							if clip.payload then table.clone(clip.payload) else nil
-						)
-					end
+					pasteClipboard(state, track, pasteT)
 				end,
 			})
 		end
@@ -1620,6 +1690,22 @@ local function markDiamond(
 						state:finishDrag()
 					end,
 					onClick = function()
+						_selectedKf:set({
+							track = track,
+							ref = kf,
+							toClipboard = function(): KfClipboard?
+								if typeof(kf.value) ~= "CFrame" then
+									return nil
+								end
+								return {
+									kind = "cframe",
+									value = kf.value,
+									easing = kf.easing,
+									outTangent = kf.outTangent,
+									inTangent = kf.inTangent,
+								}
+							end,
+						})
 						if track.kind ~= "camera" and track.kind ~= "cameraMove" then
 							return
 						end
@@ -1740,7 +1826,10 @@ local function markDiamond(
 				ContextMenu.show(gui, items)
 			end
 		end,
-		[Children] = e("UICorner")({ CornerRadius = UDim.new(0, 2) }),
+		[Children] = {
+			e("UICorner")({ CornerRadius = UDim.new(0, 2) }),
+			selectionStroke(kf),
+		},
 	})
 	return diamond
 end
@@ -1788,6 +1877,15 @@ local function propDiamond(
 					end,
 					onEnd = function()
 						state:finishDrag()
+					end,
+					onClick = function()
+						_selectedKf:set({
+							track = track,
+							ref = kf,
+							toClipboard = function(): KfClipboard?
+								return { kind = "prop", value = kf.value, easing = kf.easing }
+							end,
+						})
 					end,
 				}, diamond, input)
 			elseif input.UserInputType == Enum.UserInputType.MouseButton2 then
@@ -1883,7 +1981,10 @@ local function propDiamond(
 				ContextMenu.show(gui, items)
 			end
 		end,
-		[Children] = e("UICorner")({ CornerRadius = UDim.new(0, 2) }),
+		[Children] = {
+			e("UICorner")({ CornerRadius = UDim.new(0, 2) }),
+			selectionStroke(kf),
+		},
 	})
 	return diamond
 end
@@ -2242,6 +2343,7 @@ local function eventDiamond(
 		Position = UDim2.fromScale(0.5, 0.5),
 		Size = UDim2.new(0, 2, 1, 0),
 		ZIndex = 5,
+		[Children] = selectionStroke(ev),
 	})
 	hitTarget = e("TextButton")({
 		BackgroundTransparency = 1,
@@ -2265,6 +2367,19 @@ local function eventDiamond(
 					end,
 					onEnd = function()
 						state:finishDrag()
+					end,
+					onClick = function()
+						_selectedKf:set({
+							track = track,
+							ref = ev,
+							toClipboard = function(): KfClipboard?
+								return {
+									kind = "event",
+									name = ev.name,
+									payload = if ev.payload then table.clone(ev.payload) else nil,
+								}
+							end,
+						})
 					end,
 				}, hitTarget, input)
 			elseif input.UserInputType == Enum.UserInputType.MouseButton2 then

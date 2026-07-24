@@ -1420,6 +1420,11 @@ UserInputService.InputBegan:Connect(function(input: InputObject, gameProcessed: 
 		state:undo()
 	elseif input.KeyCode == Enum.KeyCode.Y or (input.KeyCode == Enum.KeyCode.Z and shift) then
 		state:redo()
+	elseif input.KeyCode == Enum.KeyCode.C then
+		-- 23 spec 后置项:复制选中关键帧(仅鼠标在面板内,不与 Studio 复制实例打架)
+		App.copySelectedKeyframe()
+	elseif input.KeyCode == Enum.KeyCode.V then
+		App.pasteClipboardAtPlayhead(state)
 	end
 end)
 
