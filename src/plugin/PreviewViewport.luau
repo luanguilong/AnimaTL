@@ -146,7 +146,10 @@ function PreviewViewport.new(parent: Instance): PreviewViewport
 	vf.CurrentCamera = cam
 	ViewportFxFeedback.bindViewport(vf)
 
-	-- 电影黑边(上下,近似 2.35:1 观感)
+	-- 电影黑边(上下):按容器真实宽高比动态算,把可视区裁成 2.35:1;
+	-- 容器本身比 2.35:1 更宽(几乎不会)则黑边归零。T9:替代原固定 11%。
+	local CINEMA_RATIO = 2.35
+	local bars: { Frame } = {}
 	for _, y in { 0, 1 } do
 		local bar = Instance.new("Frame")
 		bar.Name = "Letterbox"
@@ -154,10 +157,22 @@ function PreviewViewport.new(parent: Instance): PreviewViewport
 		bar.BorderSizePixel = 0
 		bar.AnchorPoint = Vector2.new(0, y)
 		bar.Position = UDim2.fromScale(0, y)
-		bar.Size = UDim2.fromScale(1, 0.11)
 		bar.ZIndex = 2
 		bar.Parent = vf
+		table.insert(bars, bar)
 	end
+	local function updateLetterbox()
+		local sz = vf.AbsoluteSize
+		local frac = 0
+		if sz.X > 0 and sz.Y > 0 then
+			frac = math.clamp((1 - (sz.X / sz.Y) / CINEMA_RATIO) / 2, 0, 0.3)
+		end
+		for _, bar in bars do
+			bar.Size = UDim2.fromScale(1, frac)
+		end
+	end
+	updateLetterbox()
+	vf:GetPropertyChangedSignal("AbsoluteSize"):Connect(updateLetterbox)
 
 	-- 三分构图网格
 	gridLine(UDim2.fromScale(1 / 3, 0), UDim2.new(0, 1, 1, 0)).Parent = vf

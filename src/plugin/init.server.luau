@@ -158,6 +158,10 @@ local cameraPath: CameraPath.CameraPath? = nil
 local pathConn: RBXScriptConnection? = nil
 local pathPreviewInputConn: RBXScriptConnection? = nil
 
+-- 3D 运镜轨迹独立显隐(T9):偏好持久化;实现在 startCameraPath 之后赋值
+local pathVisible = plugin:GetSetting("AnimaPathVisible") ~= false
+local setPathVisible: (visible: boolean) -> () = function(_visible: boolean) end
+
 -- getCutscene / getTime 已在 state 初始化处定义
 
 -- 独立预览窗口开关时启停
@@ -1124,6 +1128,12 @@ local callbacks: App.Callbacks = {
 	end,
 	appendPathPreviewMenuItems = function(gui: PluginGui, items: { ContextMenu.Item })
 		table.insert(items, { kind = "sep" })
+		table.insert(items, {
+			text = if pathVisible then "🙈 隐藏 3D 轨迹" else "👁 显示 3D 轨迹",
+			onClick = function()
+				setPathVisible(not pathVisible)
+			end,
+		})
 		for _, it in PathPreviewPrefs.menuItems(gui, plugin, rebuildCameraPathNow) do
 			table.insert(items, it)
 		end
@@ -1158,8 +1168,9 @@ local function applyTangentEdit(ed: CameraPath.TangentEdit)
 end
 
 -- 面板打开时:确保挂载 + 启动运镜轨迹;关闭时销毁轨迹与内嵌预览。
+-- 轨迹显隐(T9):隐藏 = 不建轨迹实体(所有 rebuild 站点都有 cameraPath nil 守卫,天然跳过)。
 local function startCameraPath()
-	if cameraPath then
+	if cameraPath or not pathVisible then
 		return
 	end
 	local cp = CameraPath.new()
@@ -1257,6 +1268,19 @@ local function stopCameraPath()
 		cameraPath:destroy()
 		cameraPath = nil
 	end
+end
+
+setPathVisible = function(visible: boolean)
+	pathVisible = visible
+	plugin:SetSetting("AnimaPathVisible", visible)
+	if visible then
+		if widget.Enabled then
+			startCameraPath()
+		end
+	else
+		stopCameraPath()
+	end
+	print(`[anima] 3D 运镜轨迹已{if visible then "显示" else "隐藏"}`)
 end
 
 local function ensureMounted()
