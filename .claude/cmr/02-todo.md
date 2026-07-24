@@ -19,6 +19,24 @@
 - CameraPath 轨迹开关按钮(目前随面板开关,无独立显隐;实体虽 Locked/CanQuery=false 但一直在场景里)。
 - 预览横条尺寸/黑边比例自适应(当前黑边固定 11%,非按真实输出宽高比动态算)。
 
+## 待实测(2026-07-23 新增,无独立 spec)
+
+- **选中即上镜**:未播放时在时间轴选中 camera/cameraMove 轨 → 面板内嵌预览无视生效段
+  实时渲染该视角(位姿 + FOV,K 帧前即见构图);播放中/选其他轨走 CameraDirector 正常择镜。
+  独立"相机预览"窗不受影响。实现:`CameraDirector.trackPoseIgnoreSegments` +
+  `PreviewViewport.setOverrideTrack`(仅内嵌实例注入,init.server mountPreview)。
+
+- **实时预览(跟随主视口,方案 B)**:相机轨右键「实时预览(跟随主视口,K 打帧)」toggle。
+  开启且选中相机轨且未播放 → 内嵌预览位姿 = 主视口相机、FOV = 该轨自己的
+  (fovKeyframes → vcam attribute);**K 打帧全局生效**(不要求鼠标悬在面板内),落的就是
+  预览里看到的画面。优先级高于"选中即上镜"。实现:`PreviewViewport.setViewportFollow` +
+  init `viewportFollow` Value + InputBegan K 分支。
+
+- **FOV 编辑 UI**:相机轨右键新增「视野 FOV(基础)…」(写 vcam attribute,任意值 1–120)、
+  「K FOV 帧(变焦)…」(在播放头写 fovKeyframes,同帧改值)、「FOV 帧」列表(点击改值,
+  留空删除);vcam 芯片菜单 FOV 预设后加「自定义…」。fovKeyframes 此前只有 Moon 导入能写。
+  顺手补了 clampAllTracksToDuration / trackContentEnd 漏掉 fovKeyframes 的旧缺口。
+
 ## 验证待办(task#4 装扮跟随最终验证)
 
 - 仍需真实 R6 开门动画 id + 场景放 Door/Boss 物体。
