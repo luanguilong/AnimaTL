@@ -104,6 +104,9 @@ export type EffectCue = {
 	duration: number?,
 	forgeRoot: string?, -- forge: 绑定下子实例名;空 = 整绑定
 	forgeScale: number?, -- forge: vfx.emit 缩放;缺省 1
+	-- forge 可选挂点(25 spec 追加):绑定目标下的骨骼/部件名,emit 前把包 Pivot 到它
+	-- 并挂其下;空 = 不挂,包留原位。可选字段,旧数据零迁移。
+	attachBone: string?,
 }
 
 function CutsceneFormat.effectEmitMode(cue: EffectCue): EffectEmitMode

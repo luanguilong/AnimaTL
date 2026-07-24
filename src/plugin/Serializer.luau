@@ -165,6 +165,9 @@ local function effectCue(c: CutsceneFormat.EffectCue, indent: string): string
 	if c.forgeScale and c.forgeScale ~= 1 then
 		table.insert(f, "forgeScale = " .. num(c.forgeScale))
 	end
+	if c.attachBone and c.attachBone ~= "" then
+		table.insert(f, "attachBone = " .. str(c.attachBone))
+	end
 	if c.templateName and c.templateName ~= "" then
 		table.insert(f, "templateName = " .. str(c.templateName))
 	end

@@ -83,6 +83,26 @@ local function defaultParentForEffect(target: Instance?): Instance
 	return workspace
 end
 
+-- attachBone(25 spec):emit 前把包 Pivot 到绑定目标下的指定骨骼/部件并挂其下;
+-- 找不到骨骼或字段为空则不动(不强制)。
+local function applyAttachBone(base: Instance?, root: Instance, attachBone: string?)
+	if not attachBone or attachBone == "" or not base or root == base then
+		return
+	end
+	local bone = base:FindFirstChild(attachBone, true)
+	if not bone or not bone:IsA("BasePart") or bone == root or root:IsDescendantOf(bone) then
+		return
+	end
+	pcall(function()
+		if root:IsA("Model") then
+			root:PivotTo(bone.CFrame)
+		elseif root:IsA("BasePart") then
+			(root :: BasePart).CFrame = bone.CFrame
+		end
+		root.Parent = bone
+	end)
+end
+
 local function resolveForgeEmitRoot(target: Instance?, forgeRoot: string?): Instance?
 	if not target then
 		return nil
@@ -386,6 +406,7 @@ function EffectTrack.tryOfficialForgeEmit(
 		if not r then
 			return
 		end
+		applyAttachBone(base, r, cue.attachBone)
 		for _, existing in roots do
 			if existing == r then
 				return
@@ -450,6 +471,7 @@ function EffectTrack.runForgeEditorPreview(
 		if not r then
 			return
 		end
+		applyAttachBone(base, r, cue.attachBone)
 		for _, existing in roots do
 			if existing == r then
 				return
@@ -469,6 +491,7 @@ function EffectTrack.runForgeEditorPreview(
 				local clone = template:Clone()
 				clone.Archivable = false
 				clone.Parent = target
+				applyAttachBone(target, clone, cue.attachBone)
 				table.insert(track._spawned, clone)
 				table.insert(roots, clone)
 			end

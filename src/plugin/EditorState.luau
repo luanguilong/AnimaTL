@@ -124,6 +124,7 @@ local function cloneTrack(tr: CutsceneFormat.Track): CutsceneFormat.Track
 				duration = c.duration,
 				forgeRoot = c.forgeRoot,
 				forgeScale = c.forgeScale,
+				attachBone = c.attachBone,
 			})
 		end
 	end
@@ -1687,7 +1688,8 @@ function EditorState.addEffectCue(
 	particleAssetId: string?,
 	t: number?,
 	emitMode: CutsceneFormat.EffectEmitMode?,
-	forgeRoot: string?
+	forgeRoot: string?,
+	attachBone: string?
 )
 	if track.kind ~= "effect" then
 		return
@@ -1708,6 +1710,11 @@ function EditorState.addEffectCue(
 		duration = 3,
 		forgeRoot = if mode == "forge" then forgeRoot else nil,
 		forgeScale = if mode == "forge" then 1 else nil,
+		attachBone = if mode == "forge"
+				and attachBone
+				and attachBone ~= ""
+			then attachBone
+			else nil,
 	})
 	sortEffectCues(track)
 	self:commitTracks(true)

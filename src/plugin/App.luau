@@ -24,6 +24,7 @@ local CutsceneFormat = require(script.Parent.Shared.CutsceneFormat)
 local VCam = require(script.Parent.Shared.VCam)
 local Sampler = require(script.Parent.Shared.Sampler)
 local AnimaAssets = require(script.Parent.Shared.AnimaAssets)
+local SceneResolver = require(script.Parent.SceneResolver)
 local TimelineUnity = require(script.Parent.TimelineUnity)
 local AnimationAsset = require(script.Parent.AnimationAsset)
 local Easing = require(script.Parent.Shared.Easing)
@@ -745,25 +746,21 @@ local function propValueFromText(
 	return nil
 end
 
--- Forge 特效包选择器(25 spec):列出 ReplicatedStorage.AnimaAssets 下全部 Model
--- (显示相对路径),点选回调包名;保留手输兜底;文件夹缺失给一键创建。
+-- Forge 特效包选择器(25 spec):递归列出 ReplicatedStorage 下全部 Model
+-- (显示相对路径,跳过 Anima 运行时树),点选回调包名;保留手输兜底。
 local function pickForgePack(gui: PluginGui, onPick: (name: string) -> ())
 	local items: { ContextMenu.Item } = {
-		{ kind = "header", text = "选择特效包(AnimaAssets)" },
+		{ kind = "header", text = "选择特效包(ReplicatedStorage)" },
 	}
 	local packs = AnimaAssets.listPacks()
-	if AnimaAssets.root(false) == nil then
-		table.insert(items, {
-			text = "＋ 创建 AnimaAssets 文件夹",
-			onClick = function()
-				AnimaAssets.root(true)
-				print(
-					"[anima] 已创建 ReplicatedStorage.AnimaAssets——把特效包(Model)放进去后重开本菜单"
-				)
-			end,
-		})
-	elseif #packs == 0 then
-		table.insert(items, { kind = "header", text = "(AnimaAssets 下暂无 Model)" })
+	if #packs == 0 then
+		table.insert(
+			items,
+			{
+				kind = "header",
+				text = "(ReplicatedStorage 下暂无 Model,先把特效包放进去)",
+			}
+		)
 	end
 	for _, entry in packs do
 		local packName = entry.name
@@ -788,6 +785,51 @@ local function pickForgePack(gui: PluginGui, onPick: (name: string) -> ())
 		end,
 	})
 	ContextMenu.show(gui, items, { width = 260 })
+end
+
+-- 挂点骨骼选择器(25 spec ③):列出绑定目标下的骨骼/部件(BasePart),可选;
+-- 「(不挂,包留原位)」= nil,不强制。目标编辑期解析不到时直接回 nil。
+local function pickAttachBone(
+	gui: PluginGui,
+	track: CutsceneFormat.Track,
+	onPick: (boneName: string?) -> ()
+)
+	local target = SceneResolver.resolve(track.target)
+	if not target then
+		onPick(nil)
+		return
+	end
+	local names: { string } = {}
+	local seen: { [string]: boolean } = {}
+	for _, d in target:GetDescendants() do
+		if d:IsA("BasePart") and not seen[d.Name] then
+			seen[d.Name] = true
+			table.insert(names, d.Name)
+		end
+	end
+	table.sort(names)
+	if #names == 0 then
+		onPick(nil)
+		return
+	end
+	local items: { ContextMenu.Item } = {
+		{ kind = "header", text = "挂点骨骼(" .. track.target .. " 下,可不选)" },
+		{
+			text = "(不挂,包留原位)",
+			onClick = function()
+				onPick(nil)
+			end,
+		},
+	}
+	for _, boneName in names do
+		table.insert(items, {
+			text = "  " .. boneName,
+			onClick = function()
+				onPick(boneName)
+			end,
+		})
+	end
+	ContextMenu.show(gui, items, { width = 240 })
 end
 
 -- 轨道右键菜单(左栏行 / 时间轴行共用):按类型的快捷操作 + 改名 / 换目标 / 删除。
@@ -953,7 +995,10 @@ local function showTrackMenu(
 			onClick = function()
 				pickForgePack(gui, function(packName)
 					local root = if packName ~= "" then packName else nil
-					state:addEffectCue(track, nil, nil, atTime, "forge", root)
+					-- 第二步:可选挂点骨骼(为空不强制)
+					pickAttachBone(gui, track, function(boneName)
+						state:addEffectCue(track, nil, nil, atTime, "forge", root, boneName)
+					end)
 				end)
 			end,
 		})
@@ -2729,6 +2774,15 @@ local function effectCueMarker(
 									if packName ~= "" then packName else nil
 								)
 								state:setEffectCueField(cue, "emitMode", "forge")
+							end)
+						end,
+					},
+					{
+						text = "Forge: 改挂点骨骼…"
+							.. (if cue.attachBone then `({cue.attachBone})` else "(未挂)"),
+						onClick = function()
+							pickAttachBone(gui, track, function(boneName)
+								state:setEffectCueField(cue, "attachBone", boneName)
 							end)
 						end,
 					},

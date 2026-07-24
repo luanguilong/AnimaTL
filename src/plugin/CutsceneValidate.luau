@@ -155,19 +155,19 @@ function CutsceneValidate.run(cutscene: CutsceneFormat.Cutscene): { string }
 				if not pack then
 					table.insert(
 						warns,
-						`{label}:forge 包 '{c.forgeRoot}' 在 AnimaAssets 及旧位置均未找到`
+						`{label}:forge 包 '{c.forgeRoot}' 在 ReplicatedStorage 与 workspace 均未找到`
 					)
 				elseif isLegacy then
 					table.insert(
 						warns,
-						`{label}:forge 包 '{c.forgeRoot}' 在旧位置——建议移入 ReplicatedStorage.AnimaAssets`
+						`{label}:forge 包 '{c.forgeRoot}' 在 workspace——建议移入 ReplicatedStorage`
 					)
 				end
 			end
 		end
 	end
 
-	-- AnimaAssets 内重名包(选择器靠路径区分,运行时取第一个;建议改名)
+	-- ReplicatedStorage 下重名包(选择器靠路径区分,运行时取第一个;建议改名)
 	do
 		local seen: { [string]: number } = {}
 		for _, entry in AnimaAssets.listPacks() do
@@ -177,7 +177,7 @@ function CutsceneValidate.run(cutscene: CutsceneFormat.Cutscene): { string }
 			if n > 1 then
 				table.insert(
 					warns,
-					`AnimaAssets 内有 {n} 个同名包 '{packName}',运行时取第一个——建议改名`
+					`ReplicatedStorage 下有 {n} 个同名包 '{packName}',运行时取第一个——建议改名`
 				)
 			end
 		end
